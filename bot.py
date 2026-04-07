@@ -10,6 +10,7 @@ from openai import OpenAI
 from telegram import Update
 from telegram.ext import (
     Application,
+    CommandHandler,
     ContextTypes,
     MessageHandler,
     filters,
@@ -43,6 +44,28 @@ def extract_number(text: str) -> float | None:
     if match:
         return float(match.group().replace(",", "."))
     return None
+
+
+# ─── /start command ───────────────────────────────────────────────────────────
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id == MY_TELEGRAM_ID:
+        await update.message.reply_text(
+            "✅ *Bot is running!*\n\n"
+            "You are registered as the owner.\n\n"
+            "You can ask me anything, e.g.:\n"
+            "• _show me this week_\n"
+            "• _compare last 2 weeks_\n"
+            "• _which group made most this month_\n\n"
+            "I'll message you here every time a group sends 'good night'.",
+            parse_mode="Markdown",
+        )
+    else:
+        await update.message.reply_text(
+            f"👋 Bot is active.\n\nYour Telegram ID is: `{user_id}`",
+            parse_mode="Markdown",
+        )
 
 
 # ─── Group handler ─────────────────────────────────────────────────────────────
@@ -239,6 +262,9 @@ def main():
     logger.info("Database initialized")
 
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+
+    # /start command — works in private and groups
+    app.add_handler(CommandHandler("start", start))
 
     # Group messages — detect "good night"
     app.add_handler(MessageHandler(filters.TEXT & ~filters.ChatType.PRIVATE, handle_group_message))
