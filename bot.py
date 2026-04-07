@@ -1,19 +1,25 @@
+import sys
+if sys.version_info >= (3, 13):
+    import imghdr  # noqa: F401  backport for Python 3.13+ (imghdr removed from stdlib)
+
+import asyncio
 import json
 import logging
 import os
 import re
-import sys
+import signal
 from datetime import datetime, time as dtime
 
 import pytz
 from dotenv import load_dotenv
 from openai import OpenAI
-from telegram import ParseMode
+from telegram import Update
 from telegram.ext import (
+    Application,
     CommandHandler,
-    Filters,
+    ContextTypes,
     MessageHandler,
-    Updater,
+    filters,
 )
 
 import database as db
@@ -26,6 +32,8 @@ logging.basicConfig(
     stream=sys.stdout,
 )
 logger = logging.getLogger(__name__)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
@@ -35,6 +43,11 @@ logger.info("=== BOT STARTING ===")
 logger.info("TELEGRAM_BOT_TOKEN set: %s", bool(TELEGRAM_BOT_TOKEN))
 logger.info("OPENAI_API_KEY set: %s", bool(OPENAI_API_KEY))
 logger.info("MY_TELEGRAM_ID: %s", MY_TELEGRAM_ID)
+logger.info("Python version: %s", sys.version)
+
+if not TELEGRAM_BOT_TOKEN:
+    logger.critical("TELEGRAM_BOT_TOKEN is not set. Exiting.")
+    sys.exit(1)
 
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
@@ -54,11 +67,11 @@ def extract_number(text):
 
 # ─── /start ───────────────────────────────────────────────────────────────────
 
-def start(update, context):
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     is_owner = MY_TELEGRAM_ID != 0 and user_id == MY_TELEGRAM_ID
     logger.info("/start from user_id=%s is_owner=%s", user_id, is_owner)
-    update.message.reply_text(
+    await update.message.reply_text(
         f"Bot is running!\n\n"
         f"Your Telegram ID: {user_id}\n"
         f"Owner match: {'yes' if is_owner else 'no — set MY_TELEGRAM_ID=' + str(user_id) + ' in Render'}\n\n"
@@ -68,7 +81,7 @@ def start(update, context):
 
 # ─── Group handler ────────────────────────────────────────────────────────────
 
-def handle_group_message(update, context):
+async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
         return
 
@@ -82,19 +95,21 @@ def handle_group_message(update, context):
     logger.info("'good night' detected in %s", group_name)
 
     try:
-        chat = context.bot.get_chat(update.message.chat_id)
+        chat = await context.bot.get_chat(update.message.chat_id)
     except Exception as e:
         logger.error("get_chat failed: %s", e)
-        update.message.reply_text("Error reading chat info.")
+        await update.message.reply_text("Error reading chat info.")
         return
 
     if not chat.pinned_message or not chat.pinned_message.text:
-        update.message.reply_text("No pinned message found. Please pin today's sales number first.")
+        await update.message.reply_text(
+            "No pinned message found. Please pin today's sales number first."
+        )
         return
 
     sales = extract_number(chat.pinned_message.text)
     if sales is None:
-        update.message.reply_text(
+        await update.message.reply_text(
             f"Couldn't read a number from the pinned message: \"{chat.pinned_message.text}\""
         )
         return
@@ -104,26 +119,26 @@ def handle_group_message(update, context):
     )
     logger.info("Queued sales %.2f from %s", sales, group_name)
 
-    context.bot.send_message(
+    await context.bot.send_message(
         chat_id=MY_TELEGRAM_ID,
         text=(
             f"*{group_name}* — {date_str}\n"
             f"Sales: {sales:,.2f}\n\n"
             f"What were today's expenses?"
         ),
-        parse_mode=ParseMode.MARKDOWN,
+        parse_mode="Markdown",
     )
 
 
 # ─── Private message handler ──────────────────────────────────────────────────
 
-def handle_private_message(update, context):
+async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.chat_id
     text = update.message.text.strip()
     logger.info("Private message from user_id=%s: %r", user_id, text[:80])
 
     if user_id != MY_TELEGRAM_ID:
-        update.message.reply_text(
+        await update.message.reply_text(
             f"Unauthorized. Your Telegram ID is {user_id}."
         )
         return
@@ -156,23 +171,22 @@ def handle_private_message(update, context):
                     f"\n\n*{nxt['group_name']}* — {nxt['date']}\n"
                     f"Sales: {nxt['sales']:,.2f}\n\nWhat were today's expenses?"
                 )
-            update.message.reply_text(reply, parse_mode=ParseMode.MARKDOWN)
+            await update.message.reply_text(reply, parse_mode="Markdown")
             return
 
         pending_list = "\n".join(
             f"- {p['group_name']} ({p['sales']:,.2f})" for p in pending_expenses
         )
-        update.message.reply_text(
+        await update.message.reply_text(
             f"Still waiting for expenses for:\n{pending_list}\n\nPlease reply with a number."
         )
 
-    # Natural language → GPT-4o
-    ask_ai(update, text)
+    await ask_ai(update, text)
 
 
 # ─── AI query ─────────────────────────────────────────────────────────────────
 
-def ask_ai(update, query):
+async def ask_ai(update: Update, query: str):
     logger.info("AI query: %r", query[:80])
     records = db.get_all_records()
     data_json = json.dumps(records, indent=2, default=str)
@@ -198,20 +212,20 @@ def ask_ai(update, query):
         reply = f"AI error: {e}"
         logger.error("OpenAI error: %s", e)
 
-    update.message.reply_text(reply)
+    await update.message.reply_text(reply)
 
 
 # ─── Weekly summary (job) ─────────────────────────────────────────────────────
 
-def weekly_summary(context):
+async def weekly_summary(context: ContextTypes.DEFAULT_TYPE):
     logger.info("Running weekly summary job")
     records = db.get_last_n_days(7)
 
     if not records:
-        context.bot.send_message(
+        await context.bot.send_message(
             chat_id=MY_TELEGRAM_ID,
             text="*Weekly Summary*\n\nNo records for the past 7 days.",
-            parse_mode=ParseMode.MARKDOWN,
+            parse_mode="Markdown",
         )
         return
 
@@ -242,20 +256,22 @@ def weekly_summary(context):
         f"*Total Expenses:* {total_expenses:,.2f}",
         f"*Total Net:*      {total_net:,.2f}",
     ]
-    context.bot.send_message(
+    await context.bot.send_message(
         chat_id=MY_TELEGRAM_ID,
         text="\n".join(lines),
-        parse_mode=ParseMode.MARKDOWN,
+        parse_mode="Markdown",
     )
+
+
+# ─── Error handler ────────────────────────────────────────────────────────────
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    logger.error("Unhandled exception:", exc_info=context.error)
 
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
-def main():
-    if not TELEGRAM_BOT_TOKEN:
-        logger.critical("TELEGRAM_BOT_TOKEN is not set. Exiting.")
-        sys.exit(1)
-
+async def main():
     try:
         db.init_db()
         logger.info("Database ready: %s", os.environ.get("DB_PATH", "accountant.db"))
@@ -263,27 +279,43 @@ def main():
         logger.critical("Database init failed: %s", e)
         sys.exit(1)
 
-    updater = Updater(token=TELEGRAM_BOT_TOKEN, use_context=True)
-    dp = updater.dispatcher
+    app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
-    dp.add_handler(CommandHandler("start", start))
-    dp.add_handler(MessageHandler(Filters.text & ~Filters.chat_type.private, handle_group_message))
-    dp.add_handler(MessageHandler(Filters.text & Filters.chat_type.private, handle_private_message))
+    app.add_error_handler(error_handler)
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.ChatType.PRIVATE, handle_group_message))
+    app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE, handle_private_message))
 
-    tz = pytz.timezone("Asia/Nicosia")
-    updater.job_queue.run_daily(
-        weekly_summary,
-        time=dtime(8, 0, 0, tzinfo=tz),
-        days=(0,),
-        name="weekly_summary",
-    )
-    logger.info("Weekly summary job scheduled — Mondays 08:00 Nicosia")
+    if app.job_queue is not None:
+        tz = pytz.timezone("Asia/Nicosia")
+        app.job_queue.run_daily(
+            weekly_summary,
+            time=dtime(8, 0, 0, tzinfo=tz),
+            days=(0,),
+            name="weekly_summary",
+        )
+        logger.info("Weekly summary scheduled — Mondays 08:00 Nicosia")
+    else:
+        logger.warning("job_queue is None — weekly summary disabled")
 
-    logger.info("Starting polling...")
-    updater.start_polling()
-    logger.info("Bot is running.")
-    updater.idle()
+    async with app:
+        await app.start()
+        await app.updater.start_polling(drop_pending_updates=True)
+        logger.info("Bot polling started")
+
+        stop = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            try:
+                loop.add_signal_handler(sig, stop.set)
+            except NotImplementedError:
+                pass
+        await stop.wait()
+
+        logger.info("Shutting down...")
+        await app.updater.stop()
+        await app.stop()
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
