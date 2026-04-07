@@ -25,9 +25,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
-OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
-MY_TELEGRAM_ID = int(os.environ["MY_TELEGRAM_ID"])
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
+MY_TELEGRAM_ID = int(os.environ.get("MY_TELEGRAM_ID", "0"))
 
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
@@ -50,22 +50,14 @@ def extract_number(text: str) -> float | None:
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    if user_id == MY_TELEGRAM_ID:
-        await update.message.reply_text(
-            "✅ *Bot is running!*\n\n"
-            "You are registered as the owner.\n\n"
-            "You can ask me anything, e.g.:\n"
-            "• _show me this week_\n"
-            "• _compare last 2 weeks_\n"
-            "• _which group made most this month_\n\n"
-            "I'll message you here every time a group sends 'good night'.",
-            parse_mode="Markdown",
-        )
-    else:
-        await update.message.reply_text(
-            f"👋 Bot is active.\n\nYour Telegram ID is: `{user_id}`",
-            parse_mode="Markdown",
-        )
+    is_owner = (user_id == MY_TELEGRAM_ID)
+    await update.message.reply_text(
+        f"✅ *Bot is running!*\n\n"
+        f"Your Telegram ID: `{user_id}`\n"
+        f"Owner registered: {'yes ✅' if is_owner else 'no ❌ — update MY_TELEGRAM_ID in Render'}\n\n"
+        f"{'You can ask me anything, e.g. _show me this week_' if is_owner else ''}",
+        parse_mode="Markdown",
+    )
 
 
 # ─── Group handler ─────────────────────────────────────────────────────────────
@@ -255,6 +247,12 @@ async def weekly_summary(context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+# ─── Global error handler ─────────────────────────────────────────────────────
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    logger.error("Unhandled exception: %s", context.error, exc_info=context.error)
+
+
 # ─── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
@@ -262,6 +260,8 @@ def main():
     logger.info("Database initialized")
 
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+
+    app.add_error_handler(error_handler)
 
     # /start command — works in private and groups
     app.add_handler(CommandHandler("start", start))
@@ -273,13 +273,17 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE, handle_private_message))
 
     # Weekly summary every Monday at 08:00 Limassol time
-    tz = pytz.timezone("Asia/Nicosia")
-    app.job_queue.run_daily(
-        weekly_summary,
-        time=time(8, 0, 0, tzinfo=tz),
-        days=(0,),  # Monday
-        name="weekly_summary",
-    )
+    if app.job_queue is not None:
+        tz = pytz.timezone("Asia/Nicosia")
+        app.job_queue.run_daily(
+            weekly_summary,
+            time=time(8, 0, 0, tzinfo=tz),
+            days=(0,),  # Monday
+            name="weekly_summary",
+        )
+        logger.info("Weekly summary job scheduled")
+    else:
+        logger.warning("job_queue is None — weekly summary disabled. Install APScheduler to enable it.")
 
     logger.info("Bot started — polling")
     app.run_polling(drop_pending_updates=True)
