@@ -1,0 +1,20 @@
+services:
+  - type: worker
+    name: accountant-bot
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    disk:
+      name: db
+      mountPath: /data
+      sizeGB: 1
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: MY_TELEGRAM_ID
+        sync: false
+      - key: DB_PATH
+        value: /data/accountant.db
