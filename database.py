@@ -28,8 +28,7 @@ def save_record(group_id, group_name, date, sales, expenses, net_revenue):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("SELECT id FROM records WHERE group_id=? AND date=?", (group_id, date))
-    existing = c.fetchone()
-    if existing:
+    if c.fetchone():
         c.execute(
             "UPDATE records SET sales=?, expenses=?, net_revenue=?, group_name=? WHERE group_id=? AND date=?",
             (sales, expenses, net_revenue, group_name, group_id, date),
@@ -53,7 +52,7 @@ def get_all_records():
     return rows
 
 
-def get_last_n_days(n: int):
+def get_last_n_days(n):
     since = (datetime.now() - timedelta(days=n)).strftime("%Y-%m-%d")
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
