@@ -1,7 +1,9 @@
+import asyncio
 import json
 import logging
 import os
 import re
+import signal
 import sys
 from datetime import datetime, time
 
@@ -273,7 +275,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
 
 # ─── Main ──────────────────────────────────────────────────────────────────────
 
-def main():
+async def main():
     logger.info("Initializing database at path: %s", os.environ.get("DB_PATH", "accountant.db"))
     try:
         db.init_db()
@@ -301,9 +303,26 @@ def main():
     else:
         logger.warning("job_queue is None — weekly summary disabled")
 
-    logger.info("Starting polling...")
-    app.run_polling(drop_pending_updates=True)
+    # Fully async startup — avoids asyncio.run() conflicts on Python 3.12+/3.14
+    async with app:
+        await app.start()
+        await app.updater.start_polling(drop_pending_updates=True)
+        logger.info("Bot polling started — waiting for messages")
+
+        # Keep running until SIGINT or SIGTERM
+        stop = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            try:
+                loop.add_signal_handler(sig, stop.set)
+            except NotImplementedError:
+                pass  # Windows doesn't support add_signal_handler
+
+        await stop.wait()
+        logger.info("Shutdown signal received — stopping bot")
+        await app.updater.stop()
+        await app.stop()
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
