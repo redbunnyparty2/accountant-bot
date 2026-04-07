@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import re
+import sys
 from datetime import datetime, time
 
 import pytz
@@ -20,14 +21,33 @@ import database as db
 
 load_dotenv()
 
+# ─── Logging ───────────────────────────────────────────────────────────────────
+
 logging.basicConfig(
-    format="%(asctime)s [%(levelname)s] %(message)s", level=logging.INFO
+    format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
+    level=logging.DEBUG,
+    stream=sys.stdout,
 )
 logger = logging.getLogger(__name__)
+
+# Suppress noisy httpx/httpcore debug logs
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+
+# ─── Config ────────────────────────────────────────────────────────────────────
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 MY_TELEGRAM_ID = int(os.environ.get("MY_TELEGRAM_ID", "0"))
+
+logger.info("=== BOT STARTING ===")
+logger.info("TELEGRAM_BOT_TOKEN set: %s", bool(TELEGRAM_BOT_TOKEN))
+logger.info("OPENAI_API_KEY set: %s", bool(OPENAI_API_KEY))
+logger.info("MY_TELEGRAM_ID: %s", MY_TELEGRAM_ID)
+
+if not TELEGRAM_BOT_TOKEN:
+    logger.critical("TELEGRAM_BOT_TOKEN is not set — bot cannot start")
+    sys.exit(1)
 
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
@@ -36,7 +56,7 @@ openai_client = OpenAI(api_key=OPENAI_API_KEY)
 pending_expenses: list[dict] = []
 
 
-# ─── Helpers ──────────────────────────────────────────────────────────────────
+# ─── Helpers ───────────────────────────────────────────────────────────────────
 
 def extract_number(text: str) -> float | None:
     cleaned = re.sub(r"[€$£,\s]", "", text.strip())
@@ -46,16 +66,19 @@ def extract_number(text: str) -> float | None:
     return None
 
 
-# ─── /start command ───────────────────────────────────────────────────────────
+# ─── /start ────────────────────────────────────────────────────────────────────
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    is_owner = (user_id == MY_TELEGRAM_ID)
+    username = update.effective_user.username or "no username"
+    logger.info("/start from user_id=%s username=%s", user_id, username)
+
+    is_owner = MY_TELEGRAM_ID != 0 and user_id == MY_TELEGRAM_ID
     await update.message.reply_text(
         f"✅ *Bot is running!*\n\n"
         f"Your Telegram ID: `{user_id}`\n"
-        f"Owner registered: {'yes ✅' if is_owner else 'no ❌ — update MY_TELEGRAM_ID in Render'}\n\n"
-        f"{'You can ask me anything, e.g. _show me this week_' if is_owner else ''}",
+        f"Owner match: {'yes ✅' if is_owner else 'no ❌'}\n\n"
+        f"{'You can ask me anything — e.g. _show me this week_' if is_owner else 'Only the owner can use this bot.'}",
         parse_mode="Markdown",
     )
 
@@ -63,19 +86,20 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ─── Group handler ─────────────────────────────────────────────────────────────
 
 async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Watches group chats for 'good night' from the admin."""
     if not update.message or not update.message.text:
         return
 
     text = update.message.text.lower().strip()
+    logger.debug("Group message in %s: %r", update.message.chat.title, text[:80])
+
     if "good night" not in text:
         return
 
     group_id = str(update.message.chat_id)
     group_name = update.message.chat.title or f"Group {group_id}"
     date_str = datetime.now(pytz.timezone("Asia/Nicosia")).strftime("%Y-%m-%d")
+    logger.info("'good night' detected in %s", group_name)
 
-    # Read pinned message
     chat = await context.bot.get_chat(update.message.chat_id)
     if not chat.pinned_message or not chat.pinned_message.text:
         await update.message.reply_text(
@@ -93,6 +117,7 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
     pending_expenses.append(
         {"group_id": group_id, "group_name": group_name, "date": date_str, "sales": sales}
     )
+    logger.info("Queued sales €%.2f from %s", sales, group_name)
 
     await context.bot.send_message(
         chat_id=MY_TELEGRAM_ID,
@@ -103,19 +128,23 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
         ),
         parse_mode="Markdown",
     )
-    logger.info("Good night received from %s — sales €%.2f queued", group_name, sales)
 
 
 # ─── Private message handler ───────────────────────────────────────────────────
 
 async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles all private messages from the owner."""
-    if update.message.chat_id != MY_TELEGRAM_ID:
+    user_id = update.message.chat_id
+    text = update.message.text.strip()
+    logger.info("Private message from user_id=%s: %r", user_id, text[:80])
+
+    if user_id != MY_TELEGRAM_ID:
+        logger.info("Ignoring message — not owner (MY_TELEGRAM_ID=%s)", MY_TELEGRAM_ID)
+        await update.message.reply_text(
+            f"⛔ Unauthorized. Your ID is `{user_id}`. Only the owner can use this bot.",
+            parse_mode="Markdown",
+        )
         return
 
-    text = update.message.text.strip()
-
-    # If there are pending expense requests, try to consume one
     if pending_expenses:
         amount = extract_number(text)
         if amount is not None:
@@ -130,6 +159,7 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
                 expenses=amount,
                 net_revenue=net,
             )
+            logger.info("Saved record: %s €%.2f sales, €%.2f expenses", pending["group_name"], pending["sales"], amount)
 
             reply = (
                 f"✅ *Saved — {pending['group_name']}* ({pending['date']})\n"
@@ -137,51 +167,36 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
                 f"Expenses: €{amount:,.2f}\n"
                 f"Net:      €{net:,.2f}"
             )
-
-            # Prompt for next pending if any
             if pending_expenses:
                 nxt = pending_expenses[0]
                 reply += (
                     f"\n\n💰 *{nxt['group_name']}* — {nxt['date']}\n"
-                    f"Sales: €{nxt['sales']:,.2f}\n\n"
-                    f"What were today's expenses?"
+                    f"Sales: €{nxt['sales']:,.2f}\n\nWhat were today's expenses?"
                 )
-
             await update.message.reply_text(reply, parse_mode="Markdown")
             return
 
-        # Non-number while expenses pending — remind owner
-        pending_list = "\n".join(
-            f"• {p['group_name']} (€{p['sales']:,.2f})" for p in pending_expenses
+        pending_list = "\n".join(f"• {p['group_name']} (€{p['sales']:,.2f})" for p in pending_expenses)
+        await update.message.reply_text(
+            f"⏳ Still waiting for expenses for:\n{pending_list}\n\nReply with a number."
         )
-        reminder = f"⏳ Still waiting for expenses for:\n{pending_list}\n\nReply with a number, or ask your question after."
-        await update.message.reply_text(reminder)
 
-    # Natural language query → GPT-4o
     await handle_ai_query(update, text)
 
 
-# ─── AI query ─────────────────────────────────────────────────────────────────
+# ─── AI query ──────────────────────────────────────────────────────────────────
 
 async def handle_ai_query(update: Update, query: str):
+    logger.info("AI query: %r", query[:80])
     records = db.get_all_records()
     data_json = json.dumps(records, indent=2, default=str)
     today = datetime.now(pytz.timezone("Asia/Nicosia")).strftime("%Y-%m-%d")
 
-    system_prompt = f"""You are a personal AI accountant assistant. You have full access to the owner's sales and expense records across multiple business locations.
-
-Today's date: {today}
-
-All records (JSON):
-{data_json}
-
-Rules:
-- Always use € for currency
-- Format numbers with comma separators (e.g. €1,234.50)
-- Be concise and clear
-- Use emojis to make summaries readable
-- When comparing periods, show totals and highlight the best performer
-- If no data exists for a requested period, say so clearly"""
+    system_prompt = (
+        f"You are a personal AI accountant. Today is {today}.\n\n"
+        f"Records:\n{data_json}\n\n"
+        "Always use €. Format numbers with commas. Be concise and use emojis."
+    )
 
     try:
         response = openai_client.chat.completions.create(
@@ -201,15 +216,16 @@ Rules:
     await update.message.reply_text(reply)
 
 
-# ─── Weekly summary job ────────────────────────────────────────────────────────
+# ─── Weekly summary ────────────────────────────────────────────────────────────
 
 async def weekly_summary(context: ContextTypes.DEFAULT_TYPE):
+    logger.info("Running weekly summary job")
     records = db.get_last_n_days(7)
 
     if not records:
         await context.bot.send_message(
             chat_id=MY_TELEGRAM_ID,
-            text="📊 *Weekly Summary*\n\nNo records found for the past 7 days.",
+            text="📊 *Weekly Summary*\n\nNo records for the past 7 days.",
             parse_mode="Markdown",
         )
         return
@@ -235,10 +251,12 @@ async def weekly_summary(context: ContextTypes.DEFAULT_TYPE):
             f"  Expenses: €{vals['expenses']:,.2f}\n"
             f"  Net: €{vals['net']:,.2f}\n"
         )
-    lines.append("─────────────────")
-    lines.append(f"*Total Sales:*    €{total_sales:,.2f}")
-    lines.append(f"*Total Expenses:* €{total_expenses:,.2f}")
-    lines.append(f"*Total Net:*      €{total_net:,.2f}")
+    lines += [
+        "─────────────────",
+        f"*Total Sales:*    €{total_sales:,.2f}",
+        f"*Total Expenses:* €{total_expenses:,.2f}",
+        f"*Total Net:*      €{total_net:,.2f}",
+    ]
 
     await context.bot.send_message(
         chat_id=MY_TELEGRAM_ID,
@@ -247,45 +265,43 @@ async def weekly_summary(context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-# ─── Global error handler ─────────────────────────────────────────────────────
+# ─── Global error handler ──────────────────────────────────────────────────────
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    logger.error("Unhandled exception: %s", context.error, exc_info=context.error)
+    logger.error("Unhandled exception:", exc_info=context.error)
 
 
 # ─── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
-    db.init_db()
-    logger.info("Database initialized")
+    logger.info("Initializing database at path: %s", os.environ.get("DB_PATH", "accountant.db"))
+    try:
+        db.init_db()
+        logger.info("Database ready")
+    except Exception as e:
+        logger.critical("Failed to initialize database: %s", e)
+        sys.exit(1)
 
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
     app.add_error_handler(error_handler)
-
-    # /start command — works in private and groups
     app.add_handler(CommandHandler("start", start))
-
-    # Group messages — detect "good night"
     app.add_handler(MessageHandler(filters.TEXT & ~filters.ChatType.PRIVATE, handle_group_message))
-
-    # Private messages — expenses + AI queries
     app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE, handle_private_message))
 
-    # Weekly summary every Monday at 08:00 Limassol time
     if app.job_queue is not None:
         tz = pytz.timezone("Asia/Nicosia")
         app.job_queue.run_daily(
             weekly_summary,
             time=time(8, 0, 0, tzinfo=tz),
-            days=(0,),  # Monday
+            days=(0,),
             name="weekly_summary",
         )
-        logger.info("Weekly summary job scheduled")
+        logger.info("Weekly summary job scheduled (Mondays 08:00 Nicosia)")
     else:
-        logger.warning("job_queue is None — weekly summary disabled. Install APScheduler to enable it.")
+        logger.warning("job_queue is None — weekly summary disabled")
 
-    logger.info("Bot started — polling")
+    logger.info("Starting polling...")
     app.run_polling(drop_pending_updates=True)
 
 
