@@ -241,10 +241,10 @@ def main():
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
     # Group messages — detect "good night"
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.PRIVATE, handle_group_message))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.ChatType.PRIVATE, handle_group_message))
 
     # Private messages — expenses + AI queries
-    app.add_handler(MessageHandler(filters.TEXT & filters.PRIVATE, handle_private_message))
+    app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE, handle_private_message))
 
     # Weekly summary every Monday at 08:00 Limassol time
     tz = pytz.timezone("Asia/Nicosia")
