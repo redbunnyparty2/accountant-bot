@@ -4,7 +4,7 @@ services:
     env: python
     plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn bot:app
+    startCommand: gunicorn app:app
     envVars:
       - key: TELEGRAM_BOT_TOKEN
         sync: false
