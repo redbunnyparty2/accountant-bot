@@ -1,26 +1,16 @@
-import sys
-if sys.version_info >= (3, 13):
-    import imghdr  # noqa: F401  backport for Python 3.13+ (imghdr removed from stdlib)
-
-import asyncio
 import json
 import logging
 import os
 import re
-import signal
-from datetime import datetime, time as dtime
+import sys
+from datetime import datetime
 
 import pytz
+import requests
+from apscheduler.schedulers.background import BackgroundScheduler
 from dotenv import load_dotenv
+from flask import Flask, request
 from openai import OpenAI
-from telegram import Update
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    ContextTypes,
-    MessageHandler,
-    filters,
-)
 
 import database as db
 
@@ -32,30 +22,56 @@ logging.basicConfig(
     stream=sys.stdout,
 )
 logger = logging.getLogger(__name__)
-logging.getLogger("httpx").setLevel(logging.WARNING)
-logging.getLogger("httpcore").setLevel(logging.WARNING)
 
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+# ─── Config ───────────────────────────────────────────────────────────────────
+
+TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 MY_TELEGRAM_ID = int(os.environ.get("MY_TELEGRAM_ID", "0"))
+# Render sets RENDER_EXTERNAL_URL automatically; fallback to manual WEBHOOK_URL
+WEBHOOK_URL = (
+    os.environ.get("WEBHOOK_URL")
+    or os.environ.get("RENDER_EXTERNAL_URL", "")
+).rstrip("/")
+
+TELEGRAM_API = f"https://api.telegram.org/bot{TOKEN}"
 
 logger.info("=== BOT STARTING ===")
-logger.info("TELEGRAM_BOT_TOKEN set: %s", bool(TELEGRAM_BOT_TOKEN))
+logger.info("TOKEN set: %s", bool(TOKEN))
 logger.info("OPENAI_API_KEY set: %s", bool(OPENAI_API_KEY))
 logger.info("MY_TELEGRAM_ID: %s", MY_TELEGRAM_ID)
-logger.info("Python version: %s", sys.version)
-
-if not TELEGRAM_BOT_TOKEN:
-    logger.critical("TELEGRAM_BOT_TOKEN is not set. Exiting.")
-    sys.exit(1)
+logger.info("WEBHOOK_URL: %s", WEBHOOK_URL or "(not set)")
 
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
+app = Flask(__name__)
 
 # Pending expense queue: list of {"group_id", "group_name", "date", "sales"}
 pending_expenses = []
 
 
-# ─── Helpers ──────────────────────────────────────────────────────────────────
+# ─── Telegram helpers ──────────────────────────────────────────────────────────
+
+def tg_send(chat_id, text, parse_mode="Markdown"):
+    try:
+        r = requests.post(
+            f"{TELEGRAM_API}/sendMessage",
+            json={"chat_id": chat_id, "text": text, "parse_mode": parse_mode},
+            timeout=10,
+        )
+        if not r.json().get("ok"):
+            logger.error("sendMessage failed: %s", r.text)
+    except Exception as e:
+        logger.error("sendMessage error: %s", e)
+
+
+def tg_get_chat(chat_id):
+    try:
+        r = requests.get(f"{TELEGRAM_API}/getChat", params={"chat_id": chat_id}, timeout=10)
+        return r.json().get("result", {})
+    except Exception as e:
+        logger.error("getChat error: %s", e)
+        return {}
+
 
 def extract_number(text):
     cleaned = re.sub(r"[€$£,\s]", "", text.strip())
@@ -65,53 +81,43 @@ def extract_number(text):
     return None
 
 
-# ─── /start ───────────────────────────────────────────────────────────────────
+# ─── Update handlers ──────────────────────────────────────────────────────────
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
+def handle_start(message):
+    user_id = message["from"]["id"]
     is_owner = MY_TELEGRAM_ID != 0 and user_id == MY_TELEGRAM_ID
     logger.info("/start from user_id=%s is_owner=%s", user_id, is_owner)
-    await update.message.reply_text(
+    tg_send(
+        message["chat"]["id"],
         f"Bot is running!\n\n"
         f"Your Telegram ID: {user_id}\n"
         f"Owner match: {'yes' if is_owner else 'no — set MY_TELEGRAM_ID=' + str(user_id) + ' in Render'}\n\n"
-        f"{'Ask me anything, e.g. show me this week' if is_owner else 'Only the owner can use this bot.'}"
+        f"{'Ask me anything, e.g. show me this week' if is_owner else 'Only the owner can use this bot.'}",
+        parse_mode=None,
     )
 
 
-# ─── Group handler ────────────────────────────────────────────────────────────
-
-async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message or not update.message.text:
-        return
-
-    text = update.message.text.lower().strip()
+def handle_group_message(message):
+    text = message.get("text", "").lower().strip()
     if "good night" not in text:
         return
 
-    group_id = str(update.message.chat_id)
-    group_name = update.message.chat.title or f"Group {group_id}"
+    group_id = str(message["chat"]["id"])
+    group_name = message["chat"].get("title") or f"Group {group_id}"
     date_str = datetime.now(pytz.timezone("Asia/Nicosia")).strftime("%Y-%m-%d")
     logger.info("'good night' detected in %s", group_name)
 
-    try:
-        chat = await context.bot.get_chat(update.message.chat_id)
-    except Exception as e:
-        logger.error("get_chat failed: %s", e)
-        await update.message.reply_text("Error reading chat info.")
+    chat = tg_get_chat(message["chat"]["id"])
+    pinned = chat.get("pinned_message", {})
+    pinned_text = pinned.get("text", "") if pinned else ""
+
+    if not pinned_text:
+        tg_send(message["chat"]["id"], "No pinned message found. Please pin today's sales number first.", parse_mode=None)
         return
 
-    if not chat.pinned_message or not chat.pinned_message.text:
-        await update.message.reply_text(
-            "No pinned message found. Please pin today's sales number first."
-        )
-        return
-
-    sales = extract_number(chat.pinned_message.text)
+    sales = extract_number(pinned_text)
     if sales is None:
-        await update.message.reply_text(
-            f"Couldn't read a number from the pinned message: \"{chat.pinned_message.text}\""
-        )
+        tg_send(message["chat"]["id"], f"Couldn't read a number from the pinned message: \"{pinned_text}\"", parse_mode=None)
         return
 
     pending_expenses.append(
@@ -119,28 +125,19 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
     )
     logger.info("Queued sales %.2f from %s", sales, group_name)
 
-    await context.bot.send_message(
-        chat_id=MY_TELEGRAM_ID,
-        text=(
-            f"*{group_name}* — {date_str}\n"
-            f"Sales: {sales:,.2f}\n\n"
-            f"What were today's expenses?"
-        ),
-        parse_mode="Markdown",
+    tg_send(
+        MY_TELEGRAM_ID,
+        f"*{group_name}* — {date_str}\nSales: {sales:,.2f}\n\nWhat were today's expenses?",
     )
 
 
-# ─── Private message handler ──────────────────────────────────────────────────
-
-async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.chat_id
-    text = update.message.text.strip()
+def handle_private_message(message):
+    user_id = message["from"]["id"]
+    text = message.get("text", "").strip()
     logger.info("Private message from user_id=%s: %r", user_id, text[:80])
 
     if user_id != MY_TELEGRAM_ID:
-        await update.message.reply_text(
-            f"Unauthorized. Your Telegram ID is {user_id}."
-        )
+        tg_send(message["chat"]["id"], f"Unauthorized. Your Telegram ID is {user_id}.", parse_mode=None)
         return
 
     if pending_expenses:
@@ -171,23 +168,17 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
                     f"\n\n*{nxt['group_name']}* — {nxt['date']}\n"
                     f"Sales: {nxt['sales']:,.2f}\n\nWhat were today's expenses?"
                 )
-            await update.message.reply_text(reply, parse_mode="Markdown")
+            tg_send(MY_TELEGRAM_ID, reply)
             return
 
-        pending_list = "\n".join(
-            f"- {p['group_name']} ({p['sales']:,.2f})" for p in pending_expenses
-        )
-        await update.message.reply_text(
-            f"Still waiting for expenses for:\n{pending_list}\n\nPlease reply with a number."
-        )
+        pending_list = "\n".join(f"- {p['group_name']} ({p['sales']:,.2f})" for p in pending_expenses)
+        tg_send(MY_TELEGRAM_ID, f"Still waiting for expenses for:\n{pending_list}\n\nPlease reply with a number.", parse_mode=None)
 
-    await ask_ai(update, text)
+    ask_ai(message["chat"]["id"], text)
 
 
-# ─── AI query ─────────────────────────────────────────────────────────────────
-
-async def ask_ai(update: Update, query: str):
-    logger.info("AI query: %r", query[:80])
+def ask_ai(chat_id, query):
+    logger.info("AI query from %s: %r", chat_id, query[:80])
     records = db.get_all_records()
     data_json = json.dumps(records, indent=2, default=str)
     today = datetime.now(pytz.timezone("Asia/Nicosia")).strftime("%Y-%m-%d")
@@ -212,21 +203,17 @@ async def ask_ai(update: Update, query: str):
         reply = f"AI error: {e}"
         logger.error("OpenAI error: %s", e)
 
-    await update.message.reply_text(reply)
+    tg_send(chat_id, reply)
 
 
-# ─── Weekly summary (job) ─────────────────────────────────────────────────────
+# ─── Weekly summary ────────────────────────────────────────────────────────────
 
-async def weekly_summary(context: ContextTypes.DEFAULT_TYPE):
+def weekly_summary():
     logger.info("Running weekly summary job")
     records = db.get_last_n_days(7)
 
     if not records:
-        await context.bot.send_message(
-            chat_id=MY_TELEGRAM_ID,
-            text="*Weekly Summary*\n\nNo records for the past 7 days.",
-            parse_mode="Markdown",
-        )
+        tg_send(MY_TELEGRAM_ID, "*Weekly Summary*\n\nNo records for the past 7 days.")
         return
 
     by_group = {}
@@ -244,34 +231,79 @@ async def weekly_summary(context: ContextTypes.DEFAULT_TYPE):
 
     lines = ["*Weekly Summary (last 7 days)*\n"]
     for g, v in sorted(by_group.items(), key=lambda x: x[1]["net"], reverse=True):
-        lines.append(
-            f"*{g}*\n"
-            f"  Sales: {v['sales']:,.2f}\n"
-            f"  Expenses: {v['expenses']:,.2f}\n"
-            f"  Net: {v['net']:,.2f}\n"
-        )
+        lines.append(f"*{g}*\n  Sales: {v['sales']:,.2f}\n  Expenses: {v['expenses']:,.2f}\n  Net: {v['net']:,.2f}\n")
     lines += [
         "---",
         f"*Total Sales:*    {total_sales:,.2f}",
         f"*Total Expenses:* {total_expenses:,.2f}",
         f"*Total Net:*      {total_net:,.2f}",
     ]
-    await context.bot.send_message(
-        chat_id=MY_TELEGRAM_ID,
-        text="\n".join(lines),
-        parse_mode="Markdown",
-    )
+    tg_send(MY_TELEGRAM_ID, "\n".join(lines))
 
 
-# ─── Error handler ────────────────────────────────────────────────────────────
+# ─── Flask routes ──────────────────────────────────────────────────────────────
 
-async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    logger.error("Unhandled exception:", exc_info=context.error)
+@app.route("/webhook", methods=["POST"])
+def webhook():
+    data = request.get_json(force=True, silent=True)
+    if not data:
+        return "ok", 200
+
+    message = data.get("message") or data.get("edited_message")
+    if not message or "text" not in message:
+        return "ok", 200
+
+    text = message.get("text", "")
+    chat_type = message["chat"]["type"]
+
+    logger.info("Update — chat_type=%s text=%r", chat_type, text[:60])
+
+    if text.startswith("/start"):
+        handle_start(message)
+    elif chat_type == "private":
+        handle_private_message(message)
+    elif chat_type in ("group", "supergroup"):
+        handle_group_message(message)
+
+    return "ok", 200
 
 
-# ─── Main ─────────────────────────────────────────────────────────────────────
+@app.route("/health", methods=["GET"])
+def health():
+    return {"status": "ok", "pending_expenses": len(pending_expenses)}, 200
 
-async def main():
+
+@app.route("/set_webhook", methods=["GET"])
+def set_webhook_route():
+    return _set_webhook()
+
+
+# ─── Webhook registration ──────────────────────────────────────────────────────
+
+def _set_webhook():
+    if not WEBHOOK_URL:
+        msg = "WEBHOOK_URL / RENDER_EXTERNAL_URL not set — cannot register webhook"
+        logger.warning(msg)
+        return msg, 500
+
+    url = f"{WEBHOOK_URL}/webhook"
+    r = requests.post(f"{TELEGRAM_API}/setWebhook", json={"url": url}, timeout=10)
+    result = r.json()
+    if result.get("ok"):
+        logger.info("Webhook registered: %s", url)
+        return f"Webhook set to {url}", 200
+    else:
+        logger.error("setWebhook failed: %s", result)
+        return f"Failed: {result}", 500
+
+
+# ─── Startup ──────────────────────────────────────────────────────────────────
+
+def startup():
+    if not TOKEN:
+        logger.critical("TELEGRAM_BOT_TOKEN is not set. Exiting.")
+        sys.exit(1)
+
     try:
         db.init_db()
         logger.info("Database ready: %s", os.environ.get("DB_PATH", "accountant.db"))
@@ -279,43 +311,19 @@ async def main():
         logger.critical("Database init failed: %s", e)
         sys.exit(1)
 
-    app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    # Register webhook with Telegram
+    _set_webhook()
 
-    app.add_error_handler(error_handler)
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.ChatType.PRIVATE, handle_group_message))
-    app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE, handle_private_message))
+    # Schedule weekly summary — Mondays 08:00 Nicosia time
+    tz = pytz.timezone("Asia/Nicosia")
+    scheduler = BackgroundScheduler(timezone=tz)
+    scheduler.add_job(weekly_summary, "cron", day_of_week="mon", hour=8, minute=0)
+    scheduler.start()
+    logger.info("Weekly summary scheduled — Mondays 08:00 Nicosia")
 
-    if app.job_queue is not None:
-        tz = pytz.timezone("Asia/Nicosia")
-        app.job_queue.run_daily(
-            weekly_summary,
-            time=dtime(8, 0, 0, tzinfo=tz),
-            days=(0,),
-            name="weekly_summary",
-        )
-        logger.info("Weekly summary scheduled — Mondays 08:00 Nicosia")
-    else:
-        logger.warning("job_queue is None — weekly summary disabled")
 
-    async with app:
-        await app.start()
-        await app.updater.start_polling(drop_pending_updates=True)
-        logger.info("Bot polling started")
-
-        stop = asyncio.Event()
-        loop = asyncio.get_running_loop()
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            try:
-                loop.add_signal_handler(sig, stop.set)
-            except NotImplementedError:
-                pass
-        await stop.wait()
-
-        logger.info("Shutting down...")
-        await app.updater.stop()
-        await app.stop()
-
+startup()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, debug=False)
