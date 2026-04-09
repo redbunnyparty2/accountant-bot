@@ -1,5 +1,5 @@
-flask
-requests
+flask==3.0.3
+requests==2.31.0
 openai==1.12.0
-gunicorn
-pytz
+gunicorn==21.2.0
+pytz==2024.1
