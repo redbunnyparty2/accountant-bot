@@ -86,12 +86,23 @@ def get_records(days=30):
     return rows
 
 def ask_gpt(question, records):
-    data = "\n".join([f"{r[4]}: {r[2]} Sales:€{r[5]} Expenses:€{r[6]} Net:€{r[7]}" for r in records])
+    system_prompt = (
+        "You are an AI accountant and business assistant. You help track daily revenue across multiple businesses. "
+        "You are smart, direct and helpful. When asked about data you don't have yet, explain how the tracking system works "
+        "and offer general business advice. Always respond in the same language the user writes in."
+    )
+    if records:
+        data = "\n".join([f"{r[3]}: {r[2]} Sales:€{r[4]} Expenses:€{r[5]} Net:€{r[6]}" for r in records])
+        user_content = f"Business data (last 30 days):\n{data}\n\nQuestion: {question}"
+    else:
+        user_content = question
     r = openai_client.chat.completions.create(
         model="gpt-4",
-        messages=[{"role": "system", "content": "You are a business accountant. Be concise."},
-                  {"role": "user", "content": f"Data:\n{data}\n\nQuestion: {question}"}],
-        max_tokens=300)
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_content},
+        ],
+        max_tokens=500)
     return r.choices[0].message.content
 
 @app.route("/webhook", methods=["POST"])
@@ -120,10 +131,10 @@ def webhook():
                     f"✅ Saved!\n📍 {pending[2]}\n💰 Sales: €{pending[3]}\n💸 Expenses: €{expenses}\n📊 Net: €{net}")
             except:
                 records = get_records(30)
-                send_message(MY_TELEGRAM_ID, ask_gpt(text, records) if records else "Hi! 👋 I'm your AI accountant. Here's how I work:\n\n1. Add me to your Telegram groups as admin\n2. Your admin pins the daily sales number in the group\n3. When admin types 'good night' - I'll message you asking for expenses\n4. I'll calculate your net revenue automatically\n\nYou can also ask me anything like:\n- 'show me this week'\n- 'compare last 2 weeks'\n- 'which group made most this month'\n\nNo data yet - waiting for your first 'good night' report! 📊")
+                send_message(MY_TELEGRAM_ID, ask_gpt(text, records))
         else:
             records = get_records(30)
-            send_message(MY_TELEGRAM_ID, ask_gpt(text, records) if records else "Hi! 👋 I'm your AI accountant. Here's how I work:\n\n1. Add me to your Telegram groups as admin\n2. Your admin pins the daily sales number in the group\n3. When admin types 'good night' - I'll message you asking for expenses\n4. I'll calculate your net revenue automatically\n\nYou can also ask me anything like:\n- 'show me this week'\n- 'compare last 2 weeks'\n- 'which group made most this month'\n\nNo data yet - waiting for your first 'good night' report! 📊")
+            send_message(MY_TELEGRAM_ID, ask_gpt(text, records))
 
     elif chat_type in ["group", "supergroup"]:
         if "good night" in text.lower():
