@@ -120,10 +120,10 @@ def webhook():
                     f"✅ Saved!\n📍 {pending[2]}\n💰 Sales: €{pending[3]}\n💸 Expenses: €{expenses}\n📊 Net: €{net}")
             except:
                 records = get_records(30)
-                send_message(MY_TELEGRAM_ID, ask_gpt(text, records) if records else "No data yet!")
+                send_message(MY_TELEGRAM_ID, ask_gpt(text, records) if records else "Hi! 👋 I'm your AI accountant. Here's how I work:\n\n1. Add me to your Telegram groups as admin\n2. Your admin pins the daily sales number in the group\n3. When admin types 'good night' - I'll message you asking for expenses\n4. I'll calculate your net revenue automatically\n\nYou can also ask me anything like:\n- 'show me this week'\n- 'compare last 2 weeks'\n- 'which group made most this month'\n\nNo data yet - waiting for your first 'good night' report! 📊")
         else:
             records = get_records(30)
-            send_message(MY_TELEGRAM_ID, ask_gpt(text, records) if records else "No data yet!")
+            send_message(MY_TELEGRAM_ID, ask_gpt(text, records) if records else "Hi! 👋 I'm your AI accountant. Here's how I work:\n\n1. Add me to your Telegram groups as admin\n2. Your admin pins the daily sales number in the group\n3. When admin types 'good night' - I'll message you asking for expenses\n4. I'll calculate your net revenue automatically\n\nYou can also ask me anything like:\n- 'show me this week'\n- 'compare last 2 weeks'\n- 'which group made most this month'\n\nNo data yet - waiting for your first 'good night' report! 📊")
 
     elif chat_type in ["group", "supergroup"]:
         if "good night" in text.lower():
