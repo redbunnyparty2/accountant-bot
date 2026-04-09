@@ -1,7 +1,5 @@
-python-telegram-bot==21.6
+flask
+requests
 openai==1.12.0
-flask==3.0.3
-gunicorn==21.2.0
-apscheduler==3.10.4
-python-dotenv==1.1.0
-pytz==2024.1
+gunicorn
+pytz
