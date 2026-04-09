@@ -14,6 +14,15 @@ WEBHOOK_BASE = os.environ.get("WEBHOOK_BASE", "")
 openai_client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY", ""))
 DB_PATH = os.environ.get("DB_PATH", "accountant.db")
 
+SYSTEM_PROMPT = (
+    "You are a personal AI assistant and accountant for Lucky, an experienced businessman. "
+    "He runs multiple businesses including a massage business called Anastasia in Limassol Cyprus, "
+    "and a cafe called Lisi Lounge in Tbilisi Georgia inside Sports Park by Gymnasia. "
+    "You track daily revenue from his Telegram groups. "
+    "Be direct, smart and concise. No bullshit. "
+    "Respond in the same language the user writes in - English or Russian."
+)
+
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -25,10 +34,35 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS pending (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         group_id TEXT, group_name TEXT, sales REAL, date TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS conversations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id TEXT, role TEXT, content TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
     conn.commit()
     conn.close()
 
 init_db()
+
+def save_message(user_id, role, content):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("INSERT INTO conversations (user_id, role, content) VALUES (?,?,?)",
+              (str(user_id), role, content))
+    # Keep only last 20 messages per user
+    c.execute('''DELETE FROM conversations WHERE user_id=? AND id NOT IN (
+        SELECT id FROM conversations WHERE user_id=? ORDER BY id DESC LIMIT 20)''',
+              (str(user_id), str(user_id)))
+    conn.commit()
+    conn.close()
+
+def get_history(user_id):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT role, content FROM conversations WHERE user_id=? ORDER BY id ASC",
+              (str(user_id),))
+    rows = c.fetchall()
+    conn.close()
+    return [{"role": r[0], "content": r[1]} for r in rows]
 
 def send_message(chat_id, text):
     requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
@@ -85,25 +119,23 @@ def get_records(days=30):
     conn.close()
     return rows
 
-def ask_gpt(question, records):
-    system_prompt = (
-        "You are an AI accountant and business assistant. You help track daily revenue across multiple businesses. "
-        "You are smart, direct and helpful. When asked about data you don't have yet, explain how the tracking system works "
-        "and offer general business advice. Always respond in the same language the user writes in."
-    )
+def ask_gpt(user_id, question, records):
     if records:
         data = "\n".join([f"{r[3]}: {r[2]} Sales:€{r[4]} Expenses:€{r[5]} Net:€{r[6]}" for r in records])
         user_content = f"Business data (last 30 days):\n{data}\n\nQuestion: {question}"
     else:
         user_content = question
+
+    save_message(user_id, "user", user_content)
+    history = get_history(user_id)
+
     r = openai_client.chat.completions.create(
         model="gpt-4",
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_content},
-        ],
+        messages=[{"role": "system", "content": SYSTEM_PROMPT}] + history,
         max_tokens=500)
-    return r.choices[0].message.content
+    reply = r.choices[0].message.content
+    save_message(user_id, "assistant", reply)
+    return reply
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -131,10 +163,10 @@ def webhook():
                     f"✅ Saved!\n📍 {pending[2]}\n💰 Sales: €{pending[3]}\n💸 Expenses: €{expenses}\n📊 Net: €{net}")
             except:
                 records = get_records(30)
-                send_message(MY_TELEGRAM_ID, ask_gpt(text, records))
+                send_message(MY_TELEGRAM_ID, ask_gpt(from_id, text, records))
         else:
             records = get_records(30)
-            send_message(MY_TELEGRAM_ID, ask_gpt(text, records))
+            send_message(MY_TELEGRAM_ID, ask_gpt(from_id, text, records))
 
     elif chat_type in ["group", "supergroup"]:
         if "good night" in text.lower():
