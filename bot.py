@@ -33,6 +33,8 @@ Your job:
 - You have real data from the database below
 - Never say you don't have access to anything
 
+Your connected groups: {groups_list}
+
 Database data:
 {database_data}
 
@@ -53,6 +55,10 @@ def init_db():
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id TEXT, role TEXT, content TEXT,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS groups (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        chat_id TEXT UNIQUE, chat_name TEXT,
+        added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
     conn.commit()
     conn.close()
 
@@ -78,6 +84,25 @@ def get_history(user_id):
     rows = c.fetchall()
     conn.close()
     return [{"role": r[0], "content": r[1]} for r in rows]
+
+def save_group(chat_id, chat_name):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        "INSERT OR IGNORE INTO groups (chat_id, chat_name) VALUES (?,?)",
+        (str(chat_id), chat_name))
+    conn.execute(
+        "UPDATE groups SET chat_name=? WHERE chat_id=?",
+        (chat_name, str(chat_id)))
+    conn.commit()
+    conn.close()
+
+def get_groups():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT chat_id, chat_name, added_at FROM groups ORDER BY added_at ASC")
+    rows = c.fetchall()
+    conn.close()
+    return rows
 
 def send_message(chat_id, text):
     requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
@@ -152,7 +177,15 @@ def build_database_summary():
 
 def ask_gpt(user_id, question):
     database_data = build_database_summary()
-    system_prompt = SYSTEM_PROMPT_TEMPLATE.format(database_data=database_data)
+    groups = get_groups()
+    if groups:
+        groups_list = ", ".join(f"{g[1]} (id:{g[0]})" for g in groups)
+    else:
+        groups_list = "No groups yet — add me to a group and I'll appear here"
+    system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
+        database_data=database_data,
+        groups_list=groups_list,
+    )
 
     save_message(user_id, "user", question)
     history = get_history(user_id)
@@ -195,6 +228,7 @@ def webhook():
             send_message(MY_TELEGRAM_ID, ask_gpt(from_id, text))
 
     elif chat_type in ["group", "supergroup"]:
+        save_group(chat_id, chat_name)
         if "good night" in text.lower():
             sales = get_pinned_number(chat_id)
             if sales:
@@ -204,6 +238,14 @@ def webhook():
             else:
                 send_message(MY_TELEGRAM_ID, f"⚠️ {chat_name} said good night but no pinned number found.")
     return "ok"
+
+@app.route("/my_groups")
+def my_groups():
+    groups = get_groups()
+    return {
+        "count": len(groups),
+        "groups": [{"chat_id": g[0], "chat_name": g[1], "added_at": g[2]} for g in groups]
+    }
 
 @app.route("/set_webhook")
 def set_webhook():
