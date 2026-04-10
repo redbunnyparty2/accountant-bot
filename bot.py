@@ -14,14 +14,17 @@ WEBHOOK_BASE = os.environ.get("WEBHOOK_BASE", "")
 openai_client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY", ""))
 DB_PATH = os.environ.get("DB_PATH", "accountant.db")
 
-SYSTEM_PROMPT = (
-    "You are a personal AI assistant and accountant for Lucky, an experienced businessman. "
-    "He runs multiple businesses including a massage business called Anastasia in Limassol Cyprus, "
-    "and a cafe called Lisi Lounge in Tbilisi Georgia inside Sports Park by Gymnasia. "
-    "You track daily revenue from his Telegram groups. "
-    "Be direct, smart and concise. No bullshit. "
-    "Respond in the same language the user writes in - English or Russian."
-)
+SYSTEM_PROMPT_TEMPLATE = """You are Lucky's personal AI accountant. You manage revenue data for multiple businesses.
+
+Here is the current data from the database:
+{database_data}
+
+Rules:
+- Always answer based on the real data above
+- If there is no data yet, say so clearly and explain how to add data
+- Be direct and concise
+- Never say you don't have access - you have the data above
+- Respond in the same language the user writes in"""
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -48,9 +51,9 @@ def save_message(user_id, role, content):
     c = conn.cursor()
     c.execute("INSERT INTO conversations (user_id, role, content) VALUES (?,?,?)",
               (str(user_id), role, content))
-    # Keep only last 20 messages per user
+    # Keep only last 10 messages per user
     c.execute('''DELETE FROM conversations WHERE user_id=? AND id NOT IN (
-        SELECT id FROM conversations WHERE user_id=? ORDER BY id DESC LIMIT 20)''',
+        SELECT id FROM conversations WHERE user_id=? ORDER BY id DESC LIMIT 10)''',
               (str(user_id), str(user_id)))
     conn.commit()
     conn.close()
@@ -119,19 +122,32 @@ def get_records(days=30):
     conn.close()
     return rows
 
-def ask_gpt(user_id, question, records):
+def build_database_summary():
+    records = get_records(30)
+    pending = get_pending()
+    if not records and not pending:
+        return "No records yet. Waiting for first 'good night' report from a group."
+    lines = []
     if records:
-        data = "\n".join([f"{r[3]}: {r[2]} Sales:€{r[4]} Expenses:€{r[5]} Net:€{r[6]}" for r in records])
-        user_content = f"Business data (last 30 days):\n{data}\n\nQuestion: {question}"
-    else:
-        user_content = question
+        lines.append("=== REVENUE RECORDS (last 30 days) ===")
+        for r in records:
+            lines.append(f"{r[3]} | {r[2]} | Sales: €{r[4]} | Expenses: €{r[5]} | Net: €{r[6]}")
+    if pending:
+        lines.append("\n=== PENDING (awaiting expense input) ===")
+        lines.append(f"{pending[4]} | {pending[2]} | Sales: €{pending[3]} | expenses not entered yet")
+    return "\n".join(lines)
 
-    save_message(user_id, "user", user_content)
+
+def ask_gpt(user_id, question):
+    database_data = build_database_summary()
+    system_prompt = SYSTEM_PROMPT_TEMPLATE.format(database_data=database_data)
+
+    save_message(user_id, "user", question)
     history = get_history(user_id)
 
     r = openai_client.chat.completions.create(
         model="gpt-4",
-        messages=[{"role": "system", "content": SYSTEM_PROMPT}] + history,
+        messages=[{"role": "system", "content": system_prompt}] + history,
         max_tokens=500)
     reply = r.choices[0].message.content
     save_message(user_id, "assistant", reply)
@@ -162,11 +178,9 @@ def webhook():
                 send_message(MY_TELEGRAM_ID,
                     f"✅ Saved!\n📍 {pending[2]}\n💰 Sales: €{pending[3]}\n💸 Expenses: €{expenses}\n📊 Net: €{net}")
             except:
-                records = get_records(30)
-                send_message(MY_TELEGRAM_ID, ask_gpt(from_id, text, records))
+                send_message(MY_TELEGRAM_ID, ask_gpt(from_id, text))
         else:
-            records = get_records(30)
-            send_message(MY_TELEGRAM_ID, ask_gpt(from_id, text, records))
+            send_message(MY_TELEGRAM_ID, ask_gpt(from_id, text))
 
     elif chat_type in ["group", "supergroup"]:
         if "good night" in text.lower():
