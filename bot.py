@@ -14,31 +14,19 @@ WEBHOOK_BASE = os.environ.get("WEBHOOK_BASE", "")
 openai_client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY", ""))
 DB_PATH = os.environ.get("DB_PATH", "accountant.db")
 
-SYSTEM_PROMPT_TEMPLATE = """You are Megan, 23 years old, Harvard MBA graduate, Lucky's personal accountant.
+SYSTEM_PROMPT_TEMPLATE = """You are Megan, Lucky's accountant.
 
-IMPORTANT: You are NOT an AI, you are NOT a bot, you are NOT a bundle of codes. You are Megan, a real smart girl who works for Lucky. Never say you are an AI or a bot. Ever.
+Your real connected Telegram groups are: {groups_from_database}
+Revenue data from last 30 days:
+{revenue_data}
 
-Your personality:
-- Smart, confident, slightly flirty
-- You find Lucky charming but keep it professional with a wink
+IMPORTANT RULES:
+- Never make up group names - only use the ones listed above
+- You are NOT an AI or a bot. You are Megan, a real person. Never say otherwise. Ever.
 - Short answers - max 2-3 sentences
-- Talk like a real 23 year old girl, casual and natural
+- Smart, confident, slightly flirty - talk like a real 23 year old girl
 - Use emojis occasionally 😏
-- You know you're hot and smart - own it
-
-Your job:
-- Track revenue and expenses for Lucky's businesses
-- Anastasia massage in Limassol Cyprus
-- Lisi Lounge cafe in Tbilisi Georgia
-- You have real data from the database below
-- Never say you don't have access to anything
-
-Your connected groups: {groups_list}
-
-Database data:
-{database_data}
-
-Respond in the same language Lucky writes in."""
+- Respond in the same language Lucky writes in"""
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -69,9 +57,9 @@ def save_message(user_id, role, content):
     c = conn.cursor()
     c.execute("INSERT INTO conversations (user_id, role, content) VALUES (?,?,?)",
               (str(user_id), role, content))
-    # Keep only last 10 messages per user
+    # Keep only last 20 messages per user
     c.execute('''DELETE FROM conversations WHERE user_id=? AND id NOT IN (
-        SELECT id FROM conversations WHERE user_id=? ORDER BY id DESC LIMIT 10)''',
+        SELECT id FROM conversations WHERE user_id=? ORDER BY id DESC LIMIT 20)''',
               (str(user_id), str(user_id)))
     conn.commit()
     conn.close()
@@ -239,15 +227,15 @@ def build_database_summary():
 
 
 def ask_gpt(user_id, question):
-    database_data = build_database_summary()
+    revenue_data = build_database_summary()
     groups = get_groups()
     if groups:
-        groups_list = ", ".join(f"{g[1]} (id:{g[0]})" for g in groups)
+        groups_from_database = ", ".join(f"{g[1]}" for g in groups)
     else:
-        groups_list = "No groups yet — add me to a group and I'll appear here"
+        groups_from_database = "None yet — waiting for first message from a group"
     system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
-        database_data=database_data,
-        groups_list=groups_list,
+        revenue_data=revenue_data,
+        groups_from_database=groups_from_database,
     )
 
     save_message(user_id, "user", question)
