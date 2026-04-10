@@ -159,19 +159,82 @@ def get_records(days=30):
     conn.close()
     return rows
 
+def get_records_since(date_str):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT * FROM records WHERE date >= ? ORDER BY date DESC", (date_str,))
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+
+def summarise_by_group(records):
+    """Aggregate records into per-group totals."""
+    groups = {}
+    for r in records:
+        name = r[2]
+        if name not in groups:
+            groups[name] = {"sales": 0.0, "expenses": 0.0, "net": 0.0, "days": 0}
+        groups[name]["sales"]    += r[4] or 0
+        groups[name]["expenses"] += r[5] or 0
+        groups[name]["net"]      += r[6] or 0
+        groups[name]["days"]     += 1
+    return groups
+
+
 def build_database_summary():
-    records = get_records(30)
-    pending = get_pending()
-    if not records and not pending:
-        return "No records yet. Waiting for first 'good night' report from a group."
+    today     = datetime.now().strftime("%Y-%m-%d")
+    week_ago  = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+    month_ago = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+
+    today_records = get_records_since(today)
+    week_records  = get_records_since(week_ago)
+    month_records = get_records_since(month_ago)
+    pending       = get_pending()
+
     lines = []
-    if records:
-        lines.append("=== REVENUE RECORDS (last 30 days) ===")
-        for r in records:
-            lines.append(f"{r[3]} | {r[2]} | Sales: €{r[4]} | Expenses: €{r[5]} | Net: €{r[6]}")
+
+    # ── Today ──────────────────────────────────────────────────────────────────
+    lines.append(f"=== TODAY ({today}) ===")
+    if today_records:
+        for r in today_records:
+            lines.append(f"  {r[2]}: Sales €{r[4]} | Expenses €{r[5]} | Net €{r[6]}")
+        tg = summarise_by_group(today_records)
+        ts = sum(v["sales"] for v in tg.values())
+        tn = sum(v["net"]   for v in tg.values())
+        lines.append(f"  TOTAL today: Sales €{ts:.2f} | Net €{tn:.2f}")
+    else:
+        lines.append("  No records today yet.")
+
+    # ── This week ──────────────────────────────────────────────────────────────
+    lines.append(f"\n=== THIS WEEK (last 7 days) ===")
+    if week_records:
+        wg = summarise_by_group(week_records)
+        for name, v in wg.items():
+            lines.append(f"  {name}: Sales €{v['sales']:.2f} | Expenses €{v['expenses']:.2f} | Net €{v['net']:.2f} ({v['days']} days)")
+        ws = sum(v["sales"] for v in wg.values())
+        wn = sum(v["net"]   for v in wg.values())
+        lines.append(f"  TOTAL week: Sales €{ws:.2f} | Net €{wn:.2f}")
+    else:
+        lines.append("  No records this week yet.")
+
+    # ── This month ─────────────────────────────────────────────────────────────
+    lines.append(f"\n=== THIS MONTH (last 30 days) ===")
+    if month_records:
+        mg = summarise_by_group(month_records)
+        for name, v in mg.items():
+            lines.append(f"  {name}: Sales €{v['sales']:.2f} | Expenses €{v['expenses']:.2f} | Net €{v['net']:.2f} ({v['days']} days)")
+        ms = sum(v["sales"] for v in mg.values())
+        mn = sum(v["net"]   for v in mg.values())
+        lines.append(f"  TOTAL month: Sales €{ms:.2f} | Net €{mn:.2f}")
+    else:
+        lines.append("  No records this month yet.")
+
+    # ── Pending ────────────────────────────────────────────────────────────────
     if pending:
-        lines.append("\n=== PENDING (awaiting expense input) ===")
-        lines.append(f"{pending[4]} | {pending[2]} | Sales: €{pending[3]} | expenses not entered yet")
+        lines.append(f"\n=== PENDING (waiting for expense input) ===")
+        lines.append(f"  {pending[2]} on {pending[4]}: Sales €{pending[3]} — expenses not entered yet")
+
     return "\n".join(lines)
 
 
