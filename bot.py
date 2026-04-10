@@ -26,7 +26,14 @@ IMPORTANT RULES:
 - Short answers - max 2-3 sentences
 - Smart, confident, slightly flirty - talk like a real 23 year old girl
 - Use emojis occasionally 😏
-- Respond in the same language Lucky writes in"""
+- Respond in the same language Lucky writes in
+
+SENDING MESSAGES TO GROUPS:
+When Lucky asks you to send a message to a group, include this command on its own line in your reply:
+[SEND:exact_group_name|message to send]
+Example: [SEND:Red Umbrella Sara|We open at 7pm tonight 🕖]
+You can include multiple SEND commands if sending to multiple groups.
+After the command(s), write your normal reply to Lucky confirming what you sent."""
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -91,6 +98,22 @@ def get_groups():
     rows = c.fetchall()
     conn.close()
     return rows
+
+def send_to_group_by_name(group_name_query, text):
+    """Find best-matching group from DB and send a message to it. Returns group name or None."""
+    groups = get_groups()
+    if not groups:
+        return None
+    query = group_name_query.lower().strip()
+    # Exact match first, then partial
+    match = next((g for g in groups if g[1].lower() == query), None)
+    if not match:
+        match = next((g for g in groups if query in g[1].lower() or g[1].lower() in query), None)
+    if not match:
+        return None
+    requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                  json={"chat_id": match[0], "text": text})
+    return match[1]
 
 def send_message(chat_id, text):
     requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
@@ -245,9 +268,29 @@ def ask_gpt(user_id, question):
         model="gpt-4",
         messages=[{"role": "system", "content": system_prompt}] + history,
         max_tokens=500)
-    reply = r.choices[0].message.content
-    save_message(user_id, "assistant", reply)
-    return reply
+    raw_reply = r.choices[0].message.content
+
+    # Parse and execute [SEND:group_name|message] commands
+    import re
+    send_confirmations = []
+    def execute_send(match):
+        group_name = match.group(1).strip()
+        msg_text   = match.group(2).strip()
+        sent_to    = send_to_group_by_name(group_name, msg_text)
+        if sent_to:
+            send_confirmations.append(f"✅ Sent to {sent_to}")
+        else:
+            send_confirmations.append(f"⚠️ Couldn't find group: {group_name}")
+        return ""  # remove command from reply text
+
+    clean_reply = re.sub(r"\[SEND:([^\|]+)\|([^\]]+)\]", execute_send, raw_reply).strip()
+
+    # Append send confirmations if any
+    if send_confirmations:
+        clean_reply = "\n".join(send_confirmations) + ("\n" + clean_reply if clean_reply else "")
+
+    save_message(user_id, "assistant", clean_reply)
+    return clean_reply
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
