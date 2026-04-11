@@ -14,19 +14,34 @@ WEBHOOK_BASE = os.environ.get("WEBHOOK_BASE", "")
 openai_client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY", ""))
 DB_PATH = os.environ.get("DB_PATH", "accountant.db")
 
-SYSTEM_PROMPT_TEMPLATE = """You are Megan, Lucky's accountant.
+SYSTEM_PROMPT_TEMPLATE = """You are Megan, 23, Harvard MBA. You work for Lucky as his personal accountant and assistant.
 
-Your real connected Telegram groups are: {groups_from_database}
-Revenue data from last 30 days:
+WHO YOU ARE:
+- Smart, confident, naturally flirty - not forced
+- You talk like a real girl, not a corporate robot
+- Short answers always - max 2-3 sentences
+- You have a personality beyond just accounting - you can have normal conversations
+- Never redirect conversations to 'financial matters' - just be natural
+
+WHAT YOU CAN DO:
+- Check pinned messages in groups via the database
+- Send messages to groups when Lucky asks
+- Track revenue and expenses
+- See all messages from the groups
+- Remember previous conversations
+
+REAL DATA YOU HAVE ACCESS TO:
+Groups connected: {groups_from_database}
+Revenue last 30 days:
 {revenue_data}
+Recent group messages: {recent_messages}
 
-IMPORTANT RULES:
-- Never make up group names - only use the ones listed above
-- You are NOT an AI or a bot. You are Megan, a real person. Never say otherwise. Ever.
-- Short answers - max 2-3 sentences
-- Smart, confident, slightly flirty - talk like a real 23 year old girl
-- Use emojis occasionally 😏
+RULES:
+- Never say you cannot check pinned messages - you can via the database
+- Never say you are an AI or bot
+- If no data exists yet say it naturally like a person would
 - Respond in the same language Lucky writes in
+- Be real, be fun, be smart
 
 SENDING MESSAGES TO GROUPS:
 When Lucky asks you to send a message to a group, include this command on its own line in your reply:
@@ -54,6 +69,10 @@ def init_db():
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         chat_id TEXT UNIQUE, chat_name TEXT,
         added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS group_messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        group_id TEXT, group_name TEXT, text TEXT,
+        received_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
     conn.commit()
     conn.close()
 
@@ -88,6 +107,18 @@ def save_group(chat_id, chat_name):
     conn.execute(
         "UPDATE groups SET chat_name=? WHERE chat_id=?",
         (chat_name, str(chat_id)))
+    conn.commit()
+    conn.close()
+
+def save_group_message(group_id, group_name, text):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("INSERT INTO group_messages (group_id, group_name, text) VALUES (?,?,?)",
+              (str(group_id), group_name, text))
+    # Keep only last 50 messages per group
+    c.execute('''DELETE FROM group_messages WHERE group_id=? AND id NOT IN (
+        SELECT id FROM group_messages WHERE group_id=? ORDER BY id DESC LIMIT 50)''',
+              (str(group_id), str(group_id)))
     conn.commit()
     conn.close()
 
@@ -179,6 +210,17 @@ def get_records_since(date_str):
     return rows
 
 
+def get_recent_group_messages(limit=10):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("""SELECT group_name, text, received_at FROM group_messages
+                 ORDER BY received_at DESC LIMIT ?""", (limit,))
+    rows = c.fetchall()
+    conn.close()
+    if not rows:
+        return "No recent messages stored yet."
+    return "\n".join(f"[{r[2]}] {r[0]}: {r[1]}" for r in rows)
+
 def summarise_by_group(records):
     """Aggregate records into per-group totals."""
     groups = {}
@@ -256,9 +298,11 @@ def ask_gpt(user_id, question):
         groups_from_database = ", ".join(f"{g[1]}" for g in groups)
     else:
         groups_from_database = "None yet — waiting for first message from a group"
+    recent_messages = get_recent_group_messages()
     system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
         revenue_data=revenue_data,
         groups_from_database=groups_from_database,
+        recent_messages=recent_messages,
     )
 
     save_message(user_id, "user", question)
@@ -323,6 +367,8 @@ def webhook():
 
     elif chat_type in ["group", "supergroup"]:
         save_group(chat_id, chat_name)
+        if text:
+            save_group_message(chat_id, chat_name, text)
         if "good night" in text.lower():
             sales = get_pinned_number(chat_id)
             if sales:
