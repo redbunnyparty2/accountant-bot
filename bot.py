@@ -51,6 +51,8 @@ Business revenue last 30 days:
 Recent group messages: {recent_messages}
 Family expenses this month:
 {family_expenses_data}
+Employees:
+{employee_data}
 
 RULES:
 - Never say you are an AI or bot
@@ -130,6 +132,14 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </table>
   </div>
 
+  <div class="card">
+    <h2>Employees — salary &amp; activity</h2>
+    <table>
+      <thead><tr><th>Name</th><th>Group</th><th>Collections</th><th>Expenses</th><th>Salary Paid</th><th>Balance Owed</th></tr></thead>
+      <tbody id="emp-tbody"></tbody>
+    </table>
+  </div>
+
   <div class="ts" id="ts"></div>
 
   <script>
@@ -198,6 +208,18 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         </tr>`).join('')
       : '<tr><td colspan="6" class="empty">No records yet</td></tr>';
 
+    // Employees
+    document.getElementById('emp-tbody').innerHTML = d.employees.length
+      ? d.employees.map(e => `<tr>
+          <td>${e.name}</td>
+          <td style="color:#888">${e.group_name}</td>
+          <td class="pos">${fmt(e.collections)}</td>
+          <td class="neg">${fmt(e.expenses)}</td>
+          <td>${fmt(e.paid)}</td>
+          <td class="${e.balance_owed>=0?'neg':'pos'}">${fmt(e.balance_owed)}</td>
+        </tr>`).join('')
+      : '<tr><td colspan="6" class="empty">No employees yet</td></tr>';
+
     document.getElementById('ts').textContent = 'Updated: ' + new Date().toLocaleString();
   }).catch(e => console.error(e));
   </script>
@@ -258,6 +280,26 @@ def init_db():
         id SERIAL PRIMARY KEY,
         alert_key TEXT UNIQUE,
         sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS employees (
+        id SERIAL PRIMARY KEY,
+        name TEXT, group_id TEXT, group_name TEXT,
+        base_salary REAL, base_days INTEGER,
+        bonus_salary REAL, bonus_days INTEGER,
+        bonus_start TEXT, bonus_end TEXT,
+        start_date TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS employee_payments (
+        id SERIAL PRIMARY KEY,
+        employee_id INTEGER, date TEXT, amount REAL, note TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS employee_collections (
+        id SERIAL PRIMARY KEY,
+        employee_id INTEGER, date TEXT, amount REAL, note TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS employee_expenses (
+        id SERIAL PRIMARY KEY,
+        employee_id INTEGER, date TEXT, amount REAL, category TEXT, note TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
     conn.commit()
     conn.close()
 
@@ -409,6 +451,138 @@ def build_family_expenses_summary():
     total = sum(by_cat.values())
     lines = [f"  {cat}: €{amt:.2f}" for cat, amt in sorted(by_cat.items())]
     lines.append(f"  TOTAL: €{total:.2f}")
+    return "\n".join(lines)
+
+
+# ── Employees ─────────────────────────────────────────────────────────────────
+
+def get_all_employees():
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT * FROM employees ORDER BY name ASC")
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+
+def get_employee_by_group(group_id):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT * FROM employees WHERE group_id=%s LIMIT 1", (str(group_id),))
+    row = c.fetchone()
+    conn.close()
+    return row
+
+
+def calc_salary_owed(emp):
+    """Return (total_owed, total_paid, balance) for an employee row."""
+    emp_id       = emp[0]
+    base_salary  = emp[4] or 0
+    base_days    = emp[5] or 1
+    bonus_salary = emp[6] or 0
+    bonus_days   = emp[7] or 1
+    bonus_start  = str(emp[8]) if emp[8] else None
+    bonus_end    = str(emp[9]) if emp[9] else None
+    start_date   = str(emp[10]) if emp[10] else None
+
+    if not start_date:
+        return 0.0, 0.0, 0.0
+
+    base_daily  = base_salary / base_days
+    bonus_daily = bonus_salary / bonus_days if bonus_salary else base_daily
+
+    today = datetime.now().date()
+    start = datetime.strptime(start_date, "%Y-%m-%d").date()
+    if start > today:
+        total_owed = 0.0
+    else:
+        total_days = (today - start).days + 1
+        if bonus_start and bonus_end:
+            bs = datetime.strptime(bonus_start, "%Y-%m-%d").date()
+            be = datetime.strptime(bonus_end,   "%Y-%m-%d").date()
+            overlap_start = max(start, bs)
+            overlap_end   = min(today, be)
+            bonus_worked  = max(0, (overlap_end - overlap_start).days + 1)
+            base_worked   = total_days - bonus_worked
+        else:
+            bonus_worked = 0
+            base_worked  = total_days
+        total_owed = base_worked * base_daily + bonus_worked * bonus_daily
+
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT COALESCE(SUM(amount),0) FROM employee_payments WHERE employee_id=%s", (emp_id,))
+    total_paid = c.fetchone()[0] or 0.0
+    conn.close()
+    return round(total_owed, 2), round(total_paid, 2), round(total_owed - total_paid, 2)
+
+
+def save_employee_collection(emp_id, date, amount, note):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("INSERT INTO employee_collections (employee_id, date, amount, note) VALUES (%s,%s,%s,%s)",
+              (emp_id, date, amount, note))
+    conn.commit()
+    conn.close()
+
+
+def save_employee_expense_record(emp_id, date, amount, category, note):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("INSERT INTO employee_expenses (employee_id, date, amount, category, note) VALUES (%s,%s,%s,%s,%s)",
+              (emp_id, date, amount, category, note))
+    conn.commit()
+    conn.close()
+
+
+def save_employee_payment(emp_id, date, amount, note):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("INSERT INTO employee_payments (employee_id, date, amount, note) VALUES (%s,%s,%s,%s)",
+              (emp_id, date, amount, note))
+    conn.commit()
+    conn.close()
+
+
+def parse_employee_message(text, is_lucky):
+    """Return (type, amount, category, note) or (None,None,None,None)."""
+    t = text.strip().replace("€", "")
+    # Expense keywords take priority
+    m = re.search(r'(?:spent|expense|exp|bought|потратил|купил)\s+(\d+(?:[.,]\d+)?)\s*(.*)', t, re.I)
+    if m:
+        amount   = float(m.group(1).replace(",", "."))
+        note_txt = m.group(2).strip() or t
+        return "expense", amount, categorize_expense(t), t
+    # Extract any number
+    m = re.search(r'(\d+(?:[.,]\d+)?)', t)
+    if not m:
+        return None, None, None, None
+    amount = float(m.group(1).replace(",", "."))
+    if is_lucky:
+        return "payment", amount, "", t
+    else:
+        return "collection", amount, "", t
+
+
+def build_employees_summary():
+    employees = get_all_employees()
+    if not employees:
+        return "No employees registered yet."
+    lines = []
+    month_ago = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+    conn = get_conn()
+    c = conn.cursor()
+    for emp in employees:
+        emp_id = emp[0]
+        owed, paid, balance = calc_salary_owed(emp)
+        c.execute("SELECT COALESCE(SUM(amount),0) FROM employee_collections WHERE employee_id=%s AND date>=%s",
+                  (emp_id, month_ago))
+        collections = c.fetchone()[0] or 0
+        c.execute("SELECT COALESCE(SUM(amount),0) FROM employee_expenses WHERE employee_id=%s AND date>=%s",
+                  (emp_id, month_ago))
+        expenses = c.fetchone()[0] or 0
+        lines.append(f"  {emp[1]} ({emp[3]}): Owed €{owed} | Paid €{paid} | Balance €{balance} | Collections €{collections:.0f} | Expenses €{expenses:.0f}")
+    conn.close()
     return "\n".join(lines)
 
 
@@ -651,6 +825,7 @@ def ask_gpt(user_id, question):
         groups_from_database = ", ".join(g[1] for g in get_groups()) or "None yet",
         recent_messages      = get_recent_group_messages(),
         family_expenses_data = build_family_expenses_summary(),
+        employee_data        = build_employees_summary(),
     )
     save_message(user_id, "user", question)
     history = get_history(user_id)
@@ -719,7 +894,21 @@ def webhook():
         save_group(chat_id, chat_name)
         if text:
             save_group_message(chat_id, chat_name, text)
-        if is_family_group(chat_name):
+        employee = get_employee_by_group(chat_id)
+        if employee and text:
+            is_lucky_msg = (from_id == MY_TELEGRAM_ID)
+            etype, amount, category, note = parse_employee_message(text, is_lucky_msg)
+            today_str = datetime.now().strftime("%Y-%m-%d")
+            if etype == "payment" and amount:
+                save_employee_payment(employee[0], today_str, amount, note)
+                send_message(chat_id, f"💸 Payment €{amount:.0f} saved for {employee[1]}")
+            elif etype == "collection" and amount:
+                save_employee_collection(employee[0], today_str, amount, note)
+                send_message(chat_id, f"✅ Collection €{amount:.0f} saved for {employee[1]}")
+            elif etype == "expense" and amount:
+                save_employee_expense_record(employee[0], today_str, amount, category, note)
+                send_message(chat_id, f"💰 Expense €{amount:.0f} ({category}) saved for {employee[1]}")
+        elif is_family_group(chat_name):
             expense = parse_expense_with_gpt(text, sender)
             if expense:
                 save_family_expense(
@@ -782,6 +971,25 @@ def dashboard_data():
     recent_list = [{"date": r[3], "group_name": r[2], "expense_category": r[7] if len(r) > 7 else "",
                     "sales": r[4], "expenses": r[5], "net": r[6]} for r in recent]
 
+    # Employee data
+    employees = get_all_employees()
+    emp_list  = []
+    conn2 = get_conn()
+    c2    = conn2.cursor()
+    for emp in employees:
+        emp_id = emp[0]
+        owed, paid, balance = calc_salary_owed(emp)
+        c2.execute("SELECT COALESCE(SUM(amount),0) FROM employee_collections WHERE employee_id=%s AND date>=%s",
+                   (emp_id, month_ago))
+        cols = c2.fetchone()[0] or 0
+        c2.execute("SELECT COALESCE(SUM(amount),0) FROM employee_expenses WHERE employee_id=%s AND date>=%s",
+                   (emp_id, month_ago))
+        exps = c2.fetchone()[0] or 0
+        emp_list.append({"name": emp[1], "group_name": emp[3] or "",
+                          "collections": round(float(cols), 2), "expenses": round(float(exps), 2),
+                          "paid": paid, "balance_owed": balance})
+    conn2.close()
+
     return {
         "stats": {"total_sales": round(total_sales, 2),
                   "total_expenses": round(total_expenses, 2),
@@ -790,6 +998,7 @@ def dashboard_data():
         "by_group":           by_group_list,
         "family_by_category": fam_list,
         "recent_records":     recent_list,
+        "employees":          emp_list,
     }
 
 
@@ -800,6 +1009,24 @@ def my_groups():
     groups = get_groups()
     return {"count": len(groups),
             "groups": [{"chat_id": g[0], "chat_name": g[1], "added_at": str(g[2])} for g in groups]}
+
+
+@app.route("/employees")
+def employees_endpoint():
+    employees = get_all_employees()
+    result = []
+    for emp in employees:
+        owed, paid, balance = calc_salary_owed(emp)
+        result.append({
+            "id": emp[0], "name": emp[1], "group_name": emp[3],
+            "base_salary": emp[4], "base_days": emp[5],
+            "bonus_salary": emp[6], "bonus_days": emp[7],
+            "bonus_start": str(emp[8]) if emp[8] else None,
+            "bonus_end":   str(emp[9]) if emp[9] else None,
+            "start_date":  str(emp[10]) if emp[10] else None,
+            "salary_owed": owed, "salary_paid": paid, "balance": balance,
+        })
+    return {"count": len(result), "employees": result}
 
 
 @app.route("/set_webhook")
