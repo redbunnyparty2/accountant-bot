@@ -311,20 +311,27 @@ def ask_gpt(user_id, question):
         max_tokens=500)
     raw_reply = r.choices[0].message.content
 
-    send_confirmations = []
+    successes = []
+    failures = []
     def execute_send(match):
         group_name = match.group(1).strip()
         msg_text   = match.group(2).strip()
         sent_to    = send_to_group_by_name(group_name, msg_text)
         if sent_to:
-            send_confirmations.append(f"✅ Sent to {sent_to}")
+            successes.append(f"✅ Sent to {sent_to}")
         else:
-            send_confirmations.append(f"⚠️ Couldn't find group: {group_name}")
+            failures.append(group_name)
         return ""
 
     clean_reply = re.sub(r"\[SEND:([^\|]+)\|([^\]]+)\]", execute_send, raw_reply).strip()
-    if send_confirmations:
-        clean_reply = "\n".join(send_confirmations) + ("\n" + clean_reply if clean_reply else "")
+
+    if failures:
+        # Discard GPT's reply entirely — it assumed the send worked and would lie
+        lines = [f"I don't have that group registered yet babe. Send a message in the group first so I can find it 😏"
+                 for _ in failures]
+        clean_reply = "\n".join(lines)
+    elif successes:
+        clean_reply = "\n".join(successes) + ("\n" + clean_reply if clean_reply else "")
 
     save_message(user_id, "assistant", clean_reply)
     return clean_reply
