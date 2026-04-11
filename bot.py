@@ -1,10 +1,11 @@
 import os
-import json
-import sqlite3
+import re
 import requests
 from datetime import datetime, timedelta
 from flask import Flask, request as flask_request
 from openai import OpenAI
+import psycopg2
+from psycopg2.extras import RealDictCursor
 
 app = Flask(__name__)
 
@@ -12,7 +13,7 @@ BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 MY_TELEGRAM_ID = int(os.environ.get("MY_TELEGRAM_ID", "0"))
 WEBHOOK_BASE = os.environ.get("WEBHOOK_BASE", "")
 openai_client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY", ""))
-DB_PATH = os.environ.get("DB_PATH", "accountant.db")
+DATABASE_URL = os.environ.get("DATABASE_URL", "")
 
 SYSTEM_PROMPT_TEMPLATE = """You are Megan, Lucky's assistant. You are fun, flirty, smart.
 You talk about ANYTHING Lucky wants - business, personal, fun stuff.
@@ -45,27 +46,32 @@ Example: [SEND:Red Umbrella Sara|We open at 7pm tonight 🕖]
 You can include multiple SEND commands if sending to multiple groups.
 After the command(s), write your normal reply to Lucky confirming what you sent."""
 
+
+def get_conn():
+    return psycopg2.connect(DATABASE_URL, sslmode="require")
+
+
 def init_db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_conn()
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS records (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id SERIAL PRIMARY KEY,
         group_id TEXT, group_name TEXT, date TEXT,
         sales REAL, expenses REAL, net REAL,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
     c.execute('''CREATE TABLE IF NOT EXISTS pending (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id SERIAL PRIMARY KEY,
         group_id TEXT, group_name TEXT, sales REAL, date TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS conversations (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id SERIAL PRIMARY KEY,
         user_id TEXT, role TEXT, content TEXT,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
     c.execute('''CREATE TABLE IF NOT EXISTS groups (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id SERIAL PRIMARY KEY,
         chat_id TEXT UNIQUE, chat_name TEXT,
         added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
     c.execute('''CREATE TABLE IF NOT EXISTS group_messages (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id SERIAL PRIMARY KEY,
         group_id TEXT, group_name TEXT, text TEXT,
         received_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
     conn.commit()
@@ -73,66 +79,80 @@ def init_db():
 
 init_db()
 
+
 def save_message(user_id, role, content):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_conn()
     c = conn.cursor()
-    c.execute("INSERT INTO conversations (user_id, role, content) VALUES (?,?,?)",
+    c.execute("INSERT INTO conversations (user_id, role, content) VALUES (%s,%s,%s)",
               (str(user_id), role, content))
     # Keep only last 20 messages per user
-    c.execute('''DELETE FROM conversations WHERE user_id=? AND id NOT IN (
-        SELECT id FROM conversations WHERE user_id=? ORDER BY id DESC LIMIT 20)''',
+    c.execute('''DELETE FROM conversations WHERE user_id=%s AND id NOT IN (
+        SELECT id FROM conversations WHERE user_id=%s ORDER BY id DESC LIMIT 20)''',
               (str(user_id), str(user_id)))
     conn.commit()
     conn.close()
 
+
 def get_history(user_id):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_conn()
     c = conn.cursor()
-    c.execute("SELECT role, content FROM conversations WHERE user_id=? ORDER BY id ASC",
+    c.execute("SELECT role, content FROM conversations WHERE user_id=%s ORDER BY id ASC",
               (str(user_id),))
     rows = c.fetchall()
     conn.close()
     return [{"role": r[0], "content": r[1]} for r in rows]
 
+
 def save_group(chat_id, chat_name):
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute(
-        "INSERT OR IGNORE INTO groups (chat_id, chat_name) VALUES (?,?)",
-        (str(chat_id), chat_name))
-    conn.execute(
-        "UPDATE groups SET chat_name=? WHERE chat_id=?",
-        (chat_name, str(chat_id)))
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        "INSERT INTO groups (chat_id, chat_name) VALUES (%s,%s) ON CONFLICT (chat_id) DO UPDATE SET chat_name=%s",
+        (str(chat_id), chat_name, chat_name))
     conn.commit()
     conn.close()
     print(f"Saved group: {chat_name} (id={chat_id})", flush=True)
 
+
 def save_group_message(group_id, group_name, text):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_conn()
     c = conn.cursor()
-    c.execute("INSERT INTO group_messages (group_id, group_name, text) VALUES (?,?,?)",
+    c.execute("INSERT INTO group_messages (group_id, group_name, text) VALUES (%s,%s,%s)",
               (str(group_id), group_name, text))
     # Keep only last 50 messages per group
-    c.execute('''DELETE FROM group_messages WHERE group_id=? AND id NOT IN (
-        SELECT id FROM group_messages WHERE group_id=? ORDER BY id DESC LIMIT 50)''',
+    c.execute('''DELETE FROM group_messages WHERE group_id=%s AND id NOT IN (
+        SELECT id FROM group_messages WHERE group_id=%s ORDER BY id DESC LIMIT 50)''',
               (str(group_id), str(group_id)))
     conn.commit()
     conn.close()
 
+
 def get_groups():
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_conn()
     c = conn.cursor()
     c.execute("SELECT chat_id, chat_name, added_at FROM groups ORDER BY added_at ASC")
     rows = c.fetchall()
     conn.close()
     return rows
 
+
+def get_recent_group_messages(limit=10):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("""SELECT group_name, text, received_at FROM group_messages
+                 ORDER BY received_at DESC LIMIT %s""", (limit,))
+    rows = c.fetchall()
+    conn.close()
+    if not rows:
+        return "No recent messages stored yet."
+    return "\n".join(f"[{r[2]}] {r[0]}: {r[1]}" for r in rows)
+
+
 def send_to_group_by_name(group_name_query, text):
-    """Find best-matching group from DB and send a message to it. Returns group name or None."""
     groups = get_groups()
     if not groups:
         return None
     query = group_name_query.lower().strip()
-    # Exact match first, then partial
     match = next((g for g in groups if g[1].lower() == query), None)
     if not match:
         match = next((g for g in groups if query in g[1].lower() or g[1].lower() in query), None)
@@ -142,9 +162,11 @@ def send_to_group_by_name(group_name_query, text):
                   json={"chat_id": match[0], "text": text})
     return match[1]
 
+
 def send_message(chat_id, text):
     requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
                   json={"chat_id": chat_id, "text": text})
+
 
 def get_pinned_number(chat_id):
     r = requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getChat",
@@ -155,70 +177,56 @@ def get_pinned_number(chat_id):
     except:
         return None
 
+
 def save_pending(group_id, group_name, sales):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_conn()
     c = conn.cursor()
-    c.execute("DELETE FROM pending WHERE group_id=?", (group_id,))
-    c.execute("INSERT INTO pending VALUES (NULL,?,?,?,?)",
+    c.execute("DELETE FROM pending WHERE group_id=%s", (group_id,))
+    c.execute("INSERT INTO pending (group_id, group_name, sales, date) VALUES (%s,%s,%s,%s)",
               (group_id, group_name, sales, datetime.now().strftime("%Y-%m-%d")))
     conn.commit()
     conn.close()
 
+
 def get_pending():
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_conn()
     c = conn.cursor()
     c.execute("SELECT * FROM pending ORDER BY id DESC LIMIT 1")
     row = c.fetchone()
     conn.close()
     return row
 
+
 def clear_pending():
-    conn = sqlite3.connect(DB_PATH)
-    conn.cursor().execute("DELETE FROM pending")
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("DELETE FROM pending")
     conn.commit()
     conn.close()
 
+
 def save_record(group_id, group_name, date, sales, expenses):
     net = sales - expenses
-    conn = sqlite3.connect(DB_PATH)
-    conn.cursor().execute(
-        "INSERT INTO records VALUES (NULL,?,?,?,?,?,?,CURRENT_TIMESTAMP)",
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        "INSERT INTO records (group_id, group_name, date, sales, expenses, net) VALUES (%s,%s,%s,%s,%s,%s)",
         (group_id, group_name, date, sales, expenses, net))
     conn.commit()
     conn.close()
     return net
 
-def get_records(days=30):
-    since = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT * FROM records WHERE date>=? ORDER BY date DESC", (since,))
-    rows = c.fetchall()
-    conn.close()
-    return rows
 
 def get_records_since(date_str):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_conn()
     c = conn.cursor()
-    c.execute("SELECT * FROM records WHERE date >= ? ORDER BY date DESC", (date_str,))
+    c.execute("SELECT * FROM records WHERE date >= %s ORDER BY date DESC", (date_str,))
     rows = c.fetchall()
     conn.close()
     return rows
 
 
-def get_recent_group_messages(limit=10):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("""SELECT group_name, text, received_at FROM group_messages
-                 ORDER BY received_at DESC LIMIT ?""", (limit,))
-    rows = c.fetchall()
-    conn.close()
-    if not rows:
-        return "No recent messages stored yet."
-    return "\n".join(f"[{r[2]}] {r[0]}: {r[1]}" for r in rows)
-
 def summarise_by_group(records):
-    """Aggregate records into per-group totals."""
     groups = {}
     for r in records:
         name = r[2]
@@ -243,7 +251,6 @@ def build_database_summary():
 
     lines = []
 
-    # ── Today ──────────────────────────────────────────────────────────────────
     lines.append(f"=== TODAY ({today}) ===")
     if today_records:
         for r in today_records:
@@ -255,7 +262,6 @@ def build_database_summary():
     else:
         lines.append("  No records today yet.")
 
-    # ── This week ──────────────────────────────────────────────────────────────
     lines.append(f"\n=== THIS WEEK (last 7 days) ===")
     if week_records:
         wg = summarise_by_group(week_records)
@@ -267,7 +273,6 @@ def build_database_summary():
     else:
         lines.append("  No records this week yet.")
 
-    # ── This month ─────────────────────────────────────────────────────────────
     lines.append(f"\n=== THIS MONTH (last 30 days) ===")
     if month_records:
         mg = summarise_by_group(month_records)
@@ -279,7 +284,6 @@ def build_database_summary():
     else:
         lines.append("  No records this month yet.")
 
-    # ── Pending ────────────────────────────────────────────────────────────────
     if pending:
         lines.append(f"\n=== PENDING (waiting for expense input) ===")
         lines.append(f"  {pending[2]} on {pending[4]}: Sales €{pending[3]} — expenses not entered yet")
@@ -290,10 +294,7 @@ def build_database_summary():
 def ask_gpt(user_id, question):
     revenue_data = build_database_summary()
     groups = get_groups()
-    if groups:
-        groups_from_database = ", ".join(f"{g[1]}" for g in groups)
-    else:
-        groups_from_database = "None yet — waiting for first message from a group"
+    groups_from_database = ", ".join(g[1] for g in groups) if groups else "None yet"
     recent_messages = get_recent_group_messages()
     system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
         revenue_data=revenue_data,
@@ -310,8 +311,6 @@ def ask_gpt(user_id, question):
         max_tokens=500)
     raw_reply = r.choices[0].message.content
 
-    # Parse and execute [SEND:group_name|message] commands
-    import re
     send_confirmations = []
     def execute_send(match):
         group_name = match.group(1).strip()
@@ -321,16 +320,15 @@ def ask_gpt(user_id, question):
             send_confirmations.append(f"✅ Sent to {sent_to}")
         else:
             send_confirmations.append(f"⚠️ Couldn't find group: {group_name}")
-        return ""  # remove command from reply text
+        return ""
 
     clean_reply = re.sub(r"\[SEND:([^\|]+)\|([^\]]+)\]", execute_send, raw_reply).strip()
-
-    # Append send confirmations if any
     if send_confirmations:
         clean_reply = "\n".join(send_confirmations) + ("\n" + clean_reply if clean_reply else "")
 
     save_message(user_id, "assistant", clean_reply)
     return clean_reply
+
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -341,7 +339,6 @@ def webhook():
     chat = message.get("chat", {})
     chat_id = chat.get("id")
     chat_type = chat.get("type", "")
-    # For groups title is always present; fall back to first_name for private chats
     chat_name = chat.get("title") or chat.get("first_name") or chat.get("username") or str(chat_id)
     from_id = message.get("from", {}).get("id")
     text = message.get("text", "").strip()
@@ -377,13 +374,15 @@ def webhook():
                 send_message(MY_TELEGRAM_ID, f"⚠️ {chat_name} said good night but no pinned number found.")
     return "ok"
 
+
 @app.route("/my_groups")
 def my_groups():
     groups = get_groups()
     return {
         "count": len(groups),
-        "groups": [{"chat_id": g[0], "chat_name": g[1], "added_at": g[2]} for g in groups]
+        "groups": [{"chat_id": g[0], "chat_name": g[1], "added_at": str(g[2])} for g in groups]
     }
+
 
 @app.route("/set_webhook")
 def set_webhook():
@@ -391,9 +390,11 @@ def set_webhook():
     r = requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook", json={"url": url})
     return r.json()
 
+
 @app.route("/")
 def home():
     return {"status": "✅ Accountant Bot running"}
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
