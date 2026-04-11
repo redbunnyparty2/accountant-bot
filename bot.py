@@ -1,11 +1,11 @@
 import os
 import re
+import json
 import requests
 from datetime import datetime, timedelta
 from flask import Flask, request as flask_request
 from openai import OpenAI
 import psycopg2
-from psycopg2.extras import RealDictCursor
 
 app = Flask(__name__)
 
@@ -15,6 +15,8 @@ WEBHOOK_BASE = os.environ.get("WEBHOOK_BASE", "")
 openai_client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY", ""))
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 
+FAMILY_GROUP_KEYWORDS = ["family", "expense", "расход", "семья"]
+
 SYSTEM_PROMPT_TEMPLATE = """You are Megan, Lucky's assistant. You are fun, flirty, smart.
 You talk about ANYTHING Lucky wants - business, personal, fun stuff.
 You NEVER say 'let's keep things professional' - ever.
@@ -23,20 +25,23 @@ Short answers, real language, never robotic.
 
 WHAT YOU CAN DO:
 - Send messages to groups when Lucky asks
-- Track revenue and expenses
+- Track business revenue and expenses
+- Track family expenses by category
 - See all messages from the groups
 - Remember previous conversations
 
 REAL DATA YOU HAVE ACCESS TO:
 Groups connected: {groups_from_database}
-Revenue last 30 days:
+Business revenue last 30 days:
 {revenue_data}
 Recent group messages: {recent_messages}
+Family expenses this month:
+{family_expenses_data}
 
 RULES:
 - Never say you are an AI or bot
 - If groups table is empty, say: "I'm waiting for the first message from your groups babe 😏"
-- If no revenue data yet, say it naturally like a person would
+- If no data yet, say it naturally like a person would
 - Respond in the same language Lucky writes in
 
 SENDING MESSAGES TO GROUPS:
@@ -74,18 +79,24 @@ def init_db():
         id SERIAL PRIMARY KEY,
         group_id TEXT, group_name TEXT, text TEXT,
         received_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS family_expenses (
+        id SERIAL PRIMARY KEY,
+        date TEXT, category TEXT, description TEXT,
+        amount REAL, added_by TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
     conn.commit()
     conn.close()
 
 init_db()
 
 
+# ── Conversations ──────────────────────────────────────────────────────────────
+
 def save_message(user_id, role, content):
     conn = get_conn()
     c = conn.cursor()
     c.execute("INSERT INTO conversations (user_id, role, content) VALUES (%s,%s,%s)",
               (str(user_id), role, content))
-    # Keep only last 20 messages per user
     c.execute('''DELETE FROM conversations WHERE user_id=%s AND id NOT IN (
         SELECT id FROM conversations WHERE user_id=%s ORDER BY id DESC LIMIT 20)''',
               (str(user_id), str(user_id)))
@@ -103,6 +114,8 @@ def get_history(user_id):
     return [{"role": r[0], "content": r[1]} for r in rows]
 
 
+# ── Groups ─────────────────────────────────────────────────────────────────────
+
 def save_group(chat_id, chat_name):
     conn = get_conn()
     c = conn.cursor()
@@ -119,7 +132,6 @@ def save_group_message(group_id, group_name, text):
     c = conn.cursor()
     c.execute("INSERT INTO group_messages (group_id, group_name, text) VALUES (%s,%s,%s)",
               (str(group_id), group_name, text))
-    # Keep only last 50 messages per group
     c.execute('''DELETE FROM group_messages WHERE group_id=%s AND id NOT IN (
         SELECT id FROM group_messages WHERE group_id=%s ORDER BY id DESC LIMIT 50)''',
               (str(group_id), str(group_id)))
@@ -147,6 +159,76 @@ def get_recent_group_messages(limit=10):
         return "No recent messages stored yet."
     return "\n".join(f"[{r[2]}] {r[0]}: {r[1]}" for r in rows)
 
+
+# ── Family expenses ────────────────────────────────────────────────────────────
+
+def is_family_group(chat_name):
+    name = chat_name.lower()
+    return any(kw in name for kw in FAMILY_GROUP_KEYWORDS)
+
+
+def parse_expense_with_gpt(text, sender_name):
+    """Use GPT-4 to extract expense fields. Returns dict or None."""
+    try:
+        r = openai_client.chat.completions.create(
+            model="gpt-4",
+            messages=[
+                {"role": "system", "content": (
+                    "Extract expense info from a message. "
+                    "Reply with ONLY valid JSON: "
+                    "{\"category\": \"...\", \"description\": \"...\", \"amount\": 123.45} "
+                    "Categories: Housing, Food, Kids, Transport, Health, Entertainment, Other. "
+                    "If no amount found, return null."
+                )},
+                {"role": "user", "content": text}
+            ],
+            max_tokens=100,
+            temperature=0,
+        )
+        raw = r.choices[0].message.content.strip()
+        data = json.loads(raw)
+        if data.get("amount") is None:
+            return None
+        return data
+    except:
+        return None
+
+
+def save_family_expense(date, category, description, amount, added_by):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        "INSERT INTO family_expenses (date, category, description, amount, added_by) VALUES (%s,%s,%s,%s,%s)",
+        (date, category, description, amount, added_by))
+    conn.commit()
+    conn.close()
+
+
+def get_family_expenses_since(date_str):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT * FROM family_expenses WHERE date >= %s ORDER BY date DESC", (date_str,))
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+
+def build_family_expenses_summary():
+    month_ago = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+    rows = get_family_expenses_since(month_ago)
+    if not rows:
+        return "No family expenses recorded yet."
+    by_cat = {}
+    for r in rows:
+        cat = r[2]
+        by_cat[cat] = by_cat.get(cat, 0.0) + (r[4] or 0)
+    total = sum(by_cat.values())
+    lines = [f"  {cat}: €{amt:.2f}" for cat, amt in sorted(by_cat.items())]
+    lines.append(f"  TOTAL: €{total:.2f}")
+    return "\n".join(lines)
+
+
+# ── Business records ───────────────────────────────────────────────────────────
 
 def send_to_group_by_name(group_name_query, text):
     groups = get_groups()
@@ -291,15 +373,20 @@ def build_database_summary():
     return "\n".join(lines)
 
 
+# ── GPT ────────────────────────────────────────────────────────────────────────
+
 def ask_gpt(user_id, question):
-    revenue_data = build_database_summary()
-    groups = get_groups()
+    revenue_data         = build_database_summary()
+    family_expenses_data = build_family_expenses_summary()
+    groups               = get_groups()
     groups_from_database = ", ".join(g[1] for g in groups) if groups else "None yet"
-    recent_messages = get_recent_group_messages()
+    recent_messages      = get_recent_group_messages()
+
     system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
         revenue_data=revenue_data,
         groups_from_database=groups_from_database,
         recent_messages=recent_messages,
+        family_expenses_data=family_expenses_data,
     )
 
     save_message(user_id, "user", question)
@@ -312,7 +399,8 @@ def ask_gpt(user_id, question):
     raw_reply = r.choices[0].message.content
 
     successes = []
-    failures = []
+    failures  = []
+
     def execute_send(match):
         group_name = match.group(1).strip()
         msg_text   = match.group(2).strip()
@@ -326,16 +414,15 @@ def ask_gpt(user_id, question):
     clean_reply = re.sub(r"\[SEND:([^\|]+)\|([^\]]+)\]", execute_send, raw_reply).strip()
 
     if failures:
-        # Discard GPT's reply entirely — it assumed the send worked and would lie
-        lines = [f"I don't have that group registered yet babe. Send a message in the group first so I can find it 😏"
-                 for _ in failures]
-        clean_reply = "\n".join(lines)
+        clean_reply = "I don't have that group registered yet babe. Send a message in the group first so I can find it 😏"
     elif successes:
         clean_reply = "\n".join(successes) + ("\n" + clean_reply if clean_reply else "")
 
     save_message(user_id, "assistant", clean_reply)
     return clean_reply
 
+
+# ── Webhook ────────────────────────────────────────────────────────────────────
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -344,10 +431,12 @@ def webhook():
     if not message:
         return "ok"
     chat = message.get("chat", {})
-    chat_id = chat.get("id")
+    chat_id   = chat.get("id")
     chat_type = chat.get("type", "")
     chat_name = chat.get("title") or chat.get("first_name") or chat.get("username") or str(chat_id)
-    from_id = message.get("from", {}).get("id")
+    from_user = message.get("from", {})
+    from_id   = from_user.get("id")
+    sender_name = from_user.get("first_name") or from_user.get("username") or str(from_id)
     text = message.get("text", "").strip()
 
     if chat_type == "private" and from_id == MY_TELEGRAM_ID:
@@ -371,7 +460,20 @@ def webhook():
         save_group(chat_id, chat_name)
         if text:
             save_group_message(chat_id, chat_name, text)
-        if "good night" in text.lower():
+
+        if is_family_group(chat_name) and text:
+            expense = parse_expense_with_gpt(text, sender_name)
+            if expense:
+                save_family_expense(
+                    date=datetime.now().strftime("%Y-%m-%d"),
+                    category=expense["category"],
+                    description=expense["description"],
+                    amount=expense["amount"],
+                    added_by=sender_name,
+                )
+                send_message(chat_id,
+                    f"✅ Saved! {expense['category']} €{expense['amount']:.0f}")
+        elif "good night" in text.lower():
             sales = get_pinned_number(chat_id)
             if sales:
                 save_pending(str(chat_id), chat_name, sales)
@@ -379,8 +481,11 @@ def webhook():
                     f"🌙 {chat_name}\n💰 Sales: €{sales}\nWhat were the expenses?")
             else:
                 send_message(MY_TELEGRAM_ID, f"⚠️ {chat_name} said good night but no pinned number found.")
+
     return "ok"
 
+
+# ── Endpoints ──────────────────────────────────────────────────────────────────
 
 @app.route("/my_groups")
 def my_groups():
