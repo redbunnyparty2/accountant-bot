@@ -72,70 +72,93 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Accountant Dashboard</title>
+  <title>Dashboard</title>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
   <style>
     *{box-sizing:border-box;margin:0;padding:0}
-    body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0d0d0d;color:#e0e0e0;padding:16px;max-width:900px;margin:auto}
-    h1{color:#fff;font-size:1.3rem;margin-bottom:16px;display:flex;align-items:center;gap:8px}
-    h2{color:#aaa;font-size:0.85rem;text-transform:uppercase;letter-spacing:1px;margin-bottom:12px}
-    .stats{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:20px}
-    .stat{background:#1a1a1a;border-radius:12px;padding:16px;text-align:center;border:1px solid #2a2a2a}
-    .stat .lbl{font-size:0.7rem;color:#666;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px}
-    .stat .val{font-size:1.6rem;font-weight:700;color:#4ade80}
-    .stat .val.neg{color:#f87171}
-    .card{background:#1a1a1a;border-radius:12px;padding:16px;margin-bottom:16px;border:1px solid #2a2a2a}
-    .chart-wrap{position:relative;height:200px}
-    table{width:100%;border-collapse:collapse;font-size:0.8rem}
-    td,th{padding:8px 6px;text-align:left;border-bottom:1px solid #222}
-    th{color:#666;font-weight:500;font-size:0.72rem;text-transform:uppercase}
-    td.pos{color:#4ade80} td.neg{color:#f87171}
-    .cat-row{display:flex;align-items:center;gap:8px;margin-bottom:6px}
-    .cat-row .name{width:110px;font-size:0.78rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-    .cat-row .bar-bg{flex:1;height:12px;background:#2a2a2a;border-radius:6px;overflow:hidden}
-    .cat-row .bar-fill{height:100%;border-radius:6px;background:linear-gradient(90deg,#6366f1,#8b5cf6)}
-    .cat-row .amt{width:70px;text-align:right;font-size:0.78rem;color:#888}
-    .empty{color:#555;font-size:0.8rem;padding:8px 0}
-    .ts{font-size:0.7rem;color:#444;text-align:right;margin-top:16px}
-    @media(max-width:500px){.stats{grid-template-columns:1fr 1fr}.stat .val{font-size:1.2rem}}
+    body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0d0d0d;color:#e0e0e0;padding:16px;max-width:960px;margin:auto}
+    .section-header{display:flex;align-items:center;gap:10px;margin:24px 0 12px}
+    .section-header h2{color:#fff;font-size:1rem;font-weight:600}
+    .section-header .pill{font-size:0.7rem;padding:2px 8px;border-radius:999px;font-weight:500}
+    .pill-biz{background:#14532d;color:#4ade80}
+    .pill-fam{background:#1e1b4b;color:#a5b4fc}
+    .pill-emp{background:#431407;color:#fb923c}
+    .stats{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:16px}
+    .stat{background:#1a1a1a;border-radius:12px;padding:14px;text-align:center;border:1px solid #2a2a2a}
+    .stat .lbl{font-size:0.68rem;color:#555;margin-bottom:5px;text-transform:uppercase;letter-spacing:0.5px}
+    .stat .val{font-size:1.5rem;font-weight:700;color:#4ade80}
+    .stat .val.neg{color:#f87171} .stat .val.neu{color:#a5b4fc}
+    .card{background:#1a1a1a;border-radius:12px;padding:16px;margin-bottom:12px;border:1px solid #2a2a2a}
+    .card h3{font-size:0.75rem;color:#666;text-transform:uppercase;letter-spacing:0.8px;margin-bottom:12px}
+    .chart-wrap{position:relative;height:190px}
+    table{width:100%;border-collapse:collapse;font-size:0.79rem}
+    td,th{padding:7px 6px;text-align:left;border-bottom:1px solid #1e1e1e}
+    th{color:#555;font-weight:500;font-size:0.7rem;text-transform:uppercase}
+    td.pos{color:#4ade80} td.neg{color:#f87171} td.neu{color:#a5b4fc}
+    .cat-row{display:flex;align-items:center;gap:8px;margin-bottom:7px}
+    .cat-row .cn{width:110px;font-size:0.78rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .cat-row .bg{flex:1;height:11px;background:#222;border-radius:5px;overflow:hidden}
+    .cat-row .fill{height:100%;border-radius:5px}
+    .cat-row .ca{width:68px;text-align:right;font-size:0.78rem;color:#777}
+    .empty{color:#444;font-size:0.79rem;padding:6px 0}
+    .divider{height:1px;background:#1e1e1e;margin:8px 0 20px}
+    .ts{font-size:0.68rem;color:#333;text-align:right;margin-top:16px}
+    @media(max-width:540px){.stats{grid-template-columns:1fr 1fr}.stat .val{font-size:1.2rem}}
   </style>
 </head>
 <body>
-  <h1>📊 Dashboard</h1>
 
-  <div class="stats">
-    <div class="stat"><div class="lbl">Sales this month</div><div class="val" id="s-sales">…</div></div>
-    <div class="stat"><div class="lbl">Expenses this month</div><div class="val neg" id="s-exp">…</div></div>
-    <div class="stat"><div class="lbl">Net profit</div><div class="val" id="s-net">…</div></div>
+  <!-- ── BUSINESS ── -->
+  <div class="section-header">
+    <h2>📈 Business</h2><span class="pill pill-biz">revenue</span>
   </div>
-
+  <div class="stats">
+    <div class="stat"><div class="lbl">Sales this month</div><div class="val" id="b-sales">…</div></div>
+    <div class="stat"><div class="lbl">Expenses</div><div class="val neg" id="b-exp">…</div></div>
+    <div class="stat"><div class="lbl">Net profit</div><div class="val" id="b-net">…</div></div>
+  </div>
   <div class="card">
-    <h2>Daily Revenue — last 30 days</h2>
+    <h3>Daily revenue — last 30 days</h3>
     <div class="chart-wrap"><canvas id="dailyChart"></canvas></div>
   </div>
-
   <div class="card">
-    <h2>Revenue by Group — this month</h2>
+    <h3>Per group — this month</h3>
     <div class="chart-wrap"><canvas id="groupChart"></canvas></div>
   </div>
-
   <div class="card">
-    <h2>Family Expenses by Category — this month</h2>
-    <div id="fam-cats"></div>
-  </div>
-
-  <div class="card">
-    <h2>Recent Transactions</h2>
+    <h3>Recent business transactions</h3>
     <table>
       <thead><tr><th>Date</th><th>Group</th><th>Category</th><th>Sales</th><th>Expenses</th><th>Net</th></tr></thead>
-      <tbody id="rec-tbody"></tbody>
+      <tbody id="biz-tbody"></tbody>
     </table>
   </div>
 
+  <div class="divider"></div>
+
+  <!-- ── FAMILY ── -->
+  <div class="section-header">
+    <h2>👨‍👩‍👧 Family</h2><span class="pill pill-fam">expenses</span>
+  </div>
+  <div class="stats">
+    <div class="stat"><div class="lbl">Total this month</div><div class="val neu" id="f-total">…</div></div>
+    <div class="stat"><div class="lbl">Top category</div><div class="val neu" id="f-top" style="font-size:1rem">…</div></div>
+    <div class="stat"><div class="lbl">Entries</div><div class="val neu" id="f-count">…</div></div>
+  </div>
   <div class="card">
-    <h2>Employees — salary &amp; activity</h2>
+    <h3>Breakdown by category</h3>
+    <div id="fam-cats"></div>
+  </div>
+
+  <div class="divider"></div>
+
+  <!-- ── EMPLOYEES ── -->
+  <div class="section-header">
+    <h2>👷 Employees</h2><span class="pill pill-emp">salary &amp; collections</span>
+  </div>
+  <div class="card">
+    <h3>Summary</h3>
     <table>
-      <thead><tr><th>Name</th><th>Group</th><th>Collections</th><th>Expenses</th><th>Salary Paid</th><th>Balance Owed</th></tr></thead>
+      <thead><tr><th>Name</th><th>Group</th><th>Collections</th><th>Expenses</th><th>Salary paid</th><th>Balance owed</th></tr></thead>
       <tbody id="emp-tbody"></tbody>
     </table>
   </div>
@@ -143,85 +166,88 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div class="ts" id="ts"></div>
 
   <script>
-  const fmt = v => '\u20ac' + (v||0).toFixed(0);
-  const COLORS = ['#6366f1','#8b5cf6','#ec4899','#f59e0b','#10b981','#3b82f6','#ef4444'];
+  const fmt  = v => '\u20ac' + (+(v||0)).toFixed(0);
+  const COLS = ['#6366f1','#8b5cf6','#ec4899','#f59e0b','#10b981','#3b82f6','#ef4444','#14b8a6'];
+  const cOpts = () => ({
+    responsive:true, maintainAspectRatio:false,
+    plugins:{legend:{labels:{color:'#666',boxWidth:10,font:{size:10}}}},
+    scales:{x:{ticks:{color:'#444',maxTicksLimit:8},grid:{color:'#161616'}},
+            y:{ticks:{color:'#444'},grid:{color:'#161616'}}}
+  });
 
-  fetch('/dashboard/data').then(r => r.json()).then(d => {
-    document.getElementById('s-sales').textContent = fmt(d.stats.total_sales);
-    document.getElementById('s-exp').textContent   = fmt(d.stats.total_expenses);
-    const netEl = document.getElementById('s-net');
-    netEl.textContent = fmt(d.stats.total_net);
-    if (d.stats.total_net < 0) netEl.classList.add('neg');
+  fetch('/dashboard/data').then(r=>r.json()).then(d=>{
+    const b = d.business;
+
+    // Business stats
+    document.getElementById('b-sales').textContent = fmt(b.stats.total_sales);
+    document.getElementById('b-exp').textContent   = fmt(b.stats.total_expenses);
+    const bn = document.getElementById('b-net');
+    bn.textContent = fmt(b.stats.total_net);
+    if (b.stats.total_net < 0) bn.classList.add('neg');
 
     // Daily chart
-    const cOpts = (color) => ({
-      responsive:true, maintainAspectRatio:false,
-      plugins:{legend:{labels:{color:'#888',boxWidth:12,font:{size:11}}}},
-      scales:{x:{ticks:{color:'#555',maxTicksLimit:8},grid:{color:'#1f1f1f'}},
-              y:{ticks:{color:'#555'},grid:{color:'#1f1f1f'}}}
-    });
-    new Chart(document.getElementById('dailyChart'), {
+    new Chart(document.getElementById('dailyChart'),{
       type:'line',
       data:{
-        labels: d.daily.map(x=>x.date.slice(5)),
+        labels:b.daily.map(x=>x.date.slice(5)),
         datasets:[
-          {label:'Sales',data:d.daily.map(x=>x.sales),borderColor:'#4ade80',backgroundColor:'rgba(74,222,128,0.08)',tension:0.4,fill:true,pointRadius:2},
-          {label:'Net',  data:d.daily.map(x=>x.net),  borderColor:'#6366f1',backgroundColor:'rgba(99,102,241,0.08)',tension:0.4,fill:true,pointRadius:2}
+          {label:'Sales',data:b.daily.map(x=>x.sales),borderColor:'#4ade80',backgroundColor:'rgba(74,222,128,0.07)',tension:0.4,fill:true,pointRadius:2},
+          {label:'Net',  data:b.daily.map(x=>x.net),  borderColor:'#6366f1',backgroundColor:'rgba(99,102,241,0.07)',tension:0.4,fill:true,pointRadius:2}
         ]
-      },
-      options: cOpts()
+      }, options:cOpts()
     });
 
-    // Group chart
-    new Chart(document.getElementById('groupChart'), {
+    // Per-group bar chart
+    new Chart(document.getElementById('groupChart'),{
       type:'bar',
       data:{
-        labels: d.by_group.map(x=>x.name),
+        labels:b.by_group.map(x=>x.name),
         datasets:[
-          {label:'Sales',data:d.by_group.map(x=>x.sales),backgroundColor:'rgba(74,222,128,0.7)',borderRadius:4},
-          {label:'Net',  data:d.by_group.map(x=>x.net),  backgroundColor:'rgba(99,102,241,0.7)',borderRadius:4}
+          {label:'Sales',data:b.by_group.map(x=>x.sales),backgroundColor:'rgba(74,222,128,0.75)',borderRadius:4},
+          {label:'Net',  data:b.by_group.map(x=>x.net),  backgroundColor:'rgba(99,102,241,0.75)',borderRadius:4}
         ]
-      },
-      options: cOpts()
+      }, options:cOpts()
     });
 
-    // Family categories
-    const cats = d.family_by_category;
-    const maxAmt = cats.length ? Math.max(...cats.map(c=>c.amount)) : 1;
-    document.getElementById('fam-cats').innerHTML = cats.length
-      ? cats.map((c,i) => `<div class="cat-row">
-          <div class="name">${c.category}</div>
-          <div class="bar-bg"><div class="bar-fill" style="width:${(c.amount/maxAmt*100).toFixed(0)}%;background:${COLORS[i%COLORS.length]}"></div></div>
-          <div class="amt">${fmt(c.amount)}</div>
-        </div>`).join('')
-      : '<div class="empty">No family expenses yet</div>';
-
-    // Recent records
-    document.getElementById('rec-tbody').innerHTML = d.recent_records.length
-      ? d.recent_records.map(r => `<tr>
-          <td>${r.date}</td>
-          <td>${r.group_name}</td>
-          <td style="color:#888">${r.expense_category||''}</td>
+    // Business records table
+    document.getElementById('biz-tbody').innerHTML = b.recent_records.length
+      ? b.recent_records.map(r=>`<tr>
+          <td>${r.date}</td><td>${r.group_name}</td>
+          <td style="color:#555">${r.expense_category||''}</td>
           <td class="pos">${fmt(r.sales)}</td>
           <td class="neg">${fmt(r.expenses)}</td>
           <td class="${r.net>=0?'pos':'neg'}">${fmt(r.net)}</td>
         </tr>`).join('')
       : '<tr><td colspan="6" class="empty">No records yet</td></tr>';
 
+    // Family stats
+    const f = d.family;
+    document.getElementById('f-total').textContent = fmt(f.total);
+    document.getElementById('f-count').textContent = f.count;
+    document.getElementById('f-top').textContent   = f.by_category.length ? f.by_category[0].category : '—';
+    const maxF = f.by_category.length ? Math.max(...f.by_category.map(c=>c.amount)) : 1;
+    document.getElementById('fam-cats').innerHTML = f.by_category.length
+      ? f.by_category.map((c,i)=>`<div class="cat-row">
+          <div class="cn">${c.category}</div>
+          <div class="bg"><div class="fill" style="width:${(c.amount/maxF*100).toFixed(0)}%;background:${COLS[i%COLS.length]}"></div></div>
+          <div class="ca">${fmt(c.amount)}</div>
+        </div>`).join('')
+      : '<div class="empty">No family expenses yet</div>';
+
     // Employees
     document.getElementById('emp-tbody').innerHTML = d.employees.length
-      ? d.employees.map(e => `<tr>
+      ? d.employees.map(e=>`<tr>
           <td>${e.name}</td>
-          <td style="color:#888">${e.group_name}</td>
+          <td style="color:#555">${e.group_name}</td>
           <td class="pos">${fmt(e.collections)}</td>
           <td class="neg">${fmt(e.expenses)}</td>
-          <td>${fmt(e.paid)}</td>
-          <td class="${e.balance_owed>=0?'neg':'pos'}">${fmt(e.balance_owed)}</td>
+          <td class="neu">${fmt(e.paid)}</td>
+          <td class="${e.balance_owed>0?'neg':'pos'}">${fmt(e.balance_owed)}</td>
         </tr>`).join('')
       : '<tr><td colspan="6" class="empty">No employees yet</td></tr>';
 
     document.getElementById('ts').textContent = 'Updated: ' + new Date().toLocaleString();
-  }).catch(e => console.error(e));
+  }).catch(e=>console.error(e));
   </script>
 </body>
 </html>"""
@@ -266,7 +292,9 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS groups (
         id SERIAL PRIMARY KEY,
         chat_id TEXT UNIQUE, chat_name TEXT,
+        group_type TEXT DEFAULT 'business',
         added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+    c.execute("ALTER TABLE groups ADD COLUMN IF NOT EXISTS group_type TEXT DEFAULT 'business'")
     c.execute('''CREATE TABLE IF NOT EXISTS group_messages (
         id SERIAL PRIMARY KEY,
         group_id TEXT, group_name TEXT, text TEXT,
@@ -320,6 +348,23 @@ def is_family_group(chat_name):
     return any(kw in chat_name.lower() for kw in FAMILY_GROUP_KEYWORDS)
 
 
+def detect_group_type(chat_name, chat_id=None):
+    if any(kw in chat_name.lower() for kw in ["family", "семья", "расход"]):
+        return "family"
+    if chat_id:
+        emp = get_employee_by_group(chat_id)
+        if emp:
+            return "employee"
+    # Match group name against employee names
+    employees = get_all_employees()
+    name_lower = chat_name.lower()
+    for emp in employees:
+        emp_name = (emp[1] or "").lower()
+        if emp_name and (emp_name in name_lower or name_lower in emp_name):
+            return "employee"
+    return "business"
+
+
 # ── Conversations ──────────────────────────────────────────────────────────────
 
 def save_message(user_id, role, content):
@@ -347,14 +392,16 @@ def get_history(user_id):
 # ── Groups ─────────────────────────────────────────────────────────────────────
 
 def save_group(chat_id, chat_name):
+    group_type = detect_group_type(chat_name, chat_id)
     conn = get_conn()
     c = conn.cursor()
     c.execute(
-        "INSERT INTO groups (chat_id, chat_name) VALUES (%s,%s) ON CONFLICT (chat_id) DO UPDATE SET chat_name=%s",
-        (str(chat_id), chat_name, chat_name))
+        "INSERT INTO groups (chat_id, chat_name, group_type) VALUES (%s,%s,%s) "
+        "ON CONFLICT (chat_id) DO UPDATE SET chat_name=%s, group_type=%s",
+        (str(chat_id), chat_name, group_type, chat_name, group_type))
     conn.commit()
     conn.close()
-    print(f"Saved group: {chat_name} (id={chat_id})", flush=True)
+    print(f"Saved group: {chat_name} ({group_type}) (id={chat_id})", flush=True)
 
 
 def save_group_message(group_id, group_name, text):
@@ -372,7 +419,7 @@ def save_group_message(group_id, group_name, text):
 def get_groups():
     conn = get_conn()
     c = conn.cursor()
-    c.execute("SELECT chat_id, chat_name, added_at FROM groups ORDER BY added_at ASC")
+    c.execute("SELECT chat_id, chat_name, added_at, group_type FROM groups ORDER BY added_at ASC")
     rows = c.fetchall()
     conn.close()
     return rows
@@ -941,14 +988,22 @@ def dashboard_data():
     month_ago = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
     week_ago  = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
 
-    month_records = get_records_since(month_ago)
-    total_sales    = sum(r[4] or 0 for r in month_records)
-    total_expenses = sum(r[5] or 0 for r in month_records)
-    total_net      = sum(r[6] or 0 for r in month_records)
+    # Build group_id → group_type mapping
+    groups_info = get_groups()  # (chat_id, chat_name, added_at, group_type)
+    type_by_id  = {g[0]: (g[3] or "business") for g in groups_info}
 
-    # Daily aggregation (fill all 30 days)
+    # All records, split by group type
+    all_records = get_records_since(month_ago)
+    biz_records = [r for r in all_records if type_by_id.get(str(r[1]), "business") == "business"]
+
+    # Business stats
+    biz_sales = sum(r[4] or 0 for r in biz_records)
+    biz_exp   = sum(r[5] or 0 for r in biz_records)
+    biz_net   = sum(r[6] or 0 for r in biz_records)
+
+    # Business daily
     daily_map = {}
-    for r in month_records:
+    for r in biz_records:
         d = r[3]
         if d not in daily_map:
             daily_map[d] = {"date": d, "sales": 0.0, "net": 0.0}
@@ -956,20 +1011,27 @@ def dashboard_data():
         daily_map[d]["net"]   += r[6] or 0
     daily_list = sorted(daily_map.values(), key=lambda x: x["date"])
 
-    by_group = summarise_by_group(month_records)
+    # Business by group
+    by_group = summarise_by_group(biz_records)
     by_group_list = [{"name": k, "sales": round(v["sales"], 2), "net": round(v["net"], 2)}
                      for k, v in by_group.items()]
 
-    fam_rows  = get_family_expenses_since(month_ago)
+    # Business recent records
+    biz_recent = [r for r in get_records_since(week_ago)
+                  if type_by_id.get(str(r[1]), "business") == "business"][:20]
+    recent_list = [{"date": r[3], "group_name": r[2],
+                    "expense_category": r[7] if len(r) > 7 else "",
+                    "sales": r[4], "expenses": r[5], "net": r[6]}
+                   for r in biz_recent]
+
+    # Family expenses
+    fam_rows   = get_family_expenses_since(month_ago)
     fam_by_cat = {}
     for r in fam_rows:
         fam_by_cat[r[2]] = fam_by_cat.get(r[2], 0.0) + (r[4] or 0)
-    fam_list = [{"category": k, "amount": round(v, 2)}
-                for k, v in sorted(fam_by_cat.items(), key=lambda x: -x[1])]
-
-    recent = get_records_since(week_ago)[:20]
-    recent_list = [{"date": r[3], "group_name": r[2], "expense_category": r[7] if len(r) > 7 else "",
-                    "sales": r[4], "expenses": r[5], "net": r[6]} for r in recent]
+    fam_list  = [{"category": k, "amount": round(v, 2)}
+                 for k, v in sorted(fam_by_cat.items(), key=lambda x: -x[1])]
+    fam_total = round(sum(fam_by_cat.values()), 2)
 
     # Employee data
     employees = get_all_employees()
@@ -986,19 +1048,25 @@ def dashboard_data():
                    (emp_id, month_ago))
         exps = c2.fetchone()[0] or 0
         emp_list.append({"name": emp[1], "group_name": emp[3] or "",
-                          "collections": round(float(cols), 2), "expenses": round(float(exps), 2),
-                          "paid": paid, "balance_owed": balance})
+                         "collections": round(float(cols), 2), "expenses": round(float(exps), 2),
+                         "paid": paid, "balance_owed": balance})
     conn2.close()
 
     return {
-        "stats": {"total_sales": round(total_sales, 2),
-                  "total_expenses": round(total_expenses, 2),
-                  "total_net": round(total_net, 2)},
-        "daily":              daily_list,
-        "by_group":           by_group_list,
-        "family_by_category": fam_list,
-        "recent_records":     recent_list,
-        "employees":          emp_list,
+        "business": {
+            "stats":          {"total_sales": round(biz_sales, 2),
+                               "total_expenses": round(biz_exp, 2),
+                               "total_net": round(biz_net, 2)},
+            "daily":          daily_list,
+            "by_group":       by_group_list,
+            "recent_records": recent_list,
+        },
+        "family": {
+            "by_category": fam_list,
+            "total":       fam_total,
+            "count":       len(fam_rows),
+        },
+        "employees": emp_list,
     }
 
 
@@ -1008,7 +1076,8 @@ def dashboard_data():
 def my_groups():
     groups = get_groups()
     return {"count": len(groups),
-            "groups": [{"chat_id": g[0], "chat_name": g[1], "added_at": str(g[2])} for g in groups]}
+            "groups": [{"chat_id": g[0], "chat_name": g[1], "added_at": str(g[2]),
+                        "group_type": g[3] or "business"} for g in groups]}
 
 
 @app.route("/employees")
