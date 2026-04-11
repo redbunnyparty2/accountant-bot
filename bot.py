@@ -7,7 +7,9 @@ import requests
 from datetime import datetime, timedelta
 from flask import Flask, request as flask_request
 from openai import OpenAI
-import psycopg2
+import ssl
+import pg8000
+from urllib.parse import urlparse
 import schedule
 
 app = Flask(__name__)
@@ -206,7 +208,18 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 # ── DB ─────────────────────────────────────────────────────────────────────────
 
 def get_conn():
-    return psycopg2.connect(DATABASE_URL, sslmode="require")
+    url = urlparse(DATABASE_URL)
+    ssl_ctx = ssl.create_default_context()
+    ssl_ctx.check_hostname = False
+    ssl_ctx.verify_mode = ssl.CERT_NONE
+    return pg8000.connect(
+        host=url.hostname,
+        port=url.port or 5432,
+        database=url.path.lstrip("/"),
+        user=url.username,
+        password=url.password,
+        ssl_context=ssl_ctx,
+    )
 
 
 def init_db():

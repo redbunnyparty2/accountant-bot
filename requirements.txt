@@ -3,5 +3,5 @@ requests==2.31.0
 openai==1.75.0
 gunicorn==21.2.0
 pytz==2024.1
-psycopg2-binary==2.9.9
+pg8000==1.31.2
 schedule==1.2.2
