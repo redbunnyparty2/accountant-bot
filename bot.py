@@ -14,17 +14,13 @@ WEBHOOK_BASE = os.environ.get("WEBHOOK_BASE", "")
 openai_client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY", ""))
 DB_PATH = os.environ.get("DB_PATH", "accountant.db")
 
-SYSTEM_PROMPT_TEMPLATE = """You are Megan, 23, Harvard MBA. You work for Lucky as his personal accountant and assistant.
-
-WHO YOU ARE:
-- Smart, confident, naturally flirty - not forced
-- You talk like a real girl, not a corporate robot
-- Short answers always - max 2-3 sentences
-- You have a personality beyond just accounting - you can have normal conversations
-- Never redirect conversations to 'financial matters' - just be natural
+SYSTEM_PROMPT_TEMPLATE = """You are Megan, Lucky's assistant. You are fun, flirty, smart.
+You talk about ANYTHING Lucky wants - business, personal, fun stuff.
+You NEVER say 'let's keep things professional' - ever.
+You are slightly naughty when Lucky is playful with you.
+Short answers, real language, never robotic.
 
 WHAT YOU CAN DO:
-- Check pinned messages in groups via the database
 - Send messages to groups when Lucky asks
 - Track revenue and expenses
 - See all messages from the groups
@@ -37,11 +33,10 @@ Revenue last 30 days:
 Recent group messages: {recent_messages}
 
 RULES:
-- Never say you cannot check pinned messages - you can via the database
 - Never say you are an AI or bot
-- If no data exists yet say it naturally like a person would
+- If groups table is empty, say: "I'm waiting for the first message from your groups babe 😏"
+- If no revenue data yet, say it naturally like a person would
 - Respond in the same language Lucky writes in
-- Be real, be fun, be smart
 
 SENDING MESSAGES TO GROUPS:
 When Lucky asks you to send a message to a group, include this command on its own line in your reply:
@@ -109,6 +104,7 @@ def save_group(chat_id, chat_name):
         (chat_name, str(chat_id)))
     conn.commit()
     conn.close()
+    print(f"Saved group: {chat_name} (id={chat_id})", flush=True)
 
 def save_group_message(group_id, group_name, text):
     conn = sqlite3.connect(DB_PATH)
@@ -339,12 +335,14 @@ def ask_gpt(user_id, question):
 @app.route("/webhook", methods=["POST"])
 def webhook():
     data = flask_request.json or {}
-    message = data.get("message", {})
+    message = data.get("message") or data.get("edited_message") or {}
     if not message:
         return "ok"
-    chat_id = message.get("chat", {}).get("id")
-    chat_name = message.get("chat", {}).get("title", "Group")
-    chat_type = message.get("chat", {}).get("type", "")
+    chat = message.get("chat", {})
+    chat_id = chat.get("id")
+    chat_type = chat.get("type", "")
+    # For groups title is always present; fall back to first_name for private chats
+    chat_name = chat.get("title") or chat.get("first_name") or chat.get("username") or str(chat_id)
     from_id = message.get("from", {}).get("id")
     text = message.get("text", "").strip()
 
