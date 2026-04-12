@@ -22,6 +22,9 @@ DATABASE_URL     = os.environ.get("DATABASE_URL", "")
 
 FAMILY_GROUP_KEYWORDS = ["family", "expense", "расход", "семья"]
 
+GEL_TO_EUR = 1 / 3.0   # 1 EUR = 3.0 GEL
+USD_TO_EUR = 1 / 1.08  # 1 EUR ≈ 1.08 USD
+
 EXPENSE_KEYWORDS = {
     "Housing":   ["rent", "apartment", "office", "utilities", "utility", "electricity", "water", "internet"],
     "Staff":     ["salary", "wages", "admin", "staff", "employee", "salaries", "wage"],
@@ -303,6 +306,20 @@ def init_db():
         id SERIAL PRIMARY KEY,
         date TEXT, category TEXT, description TEXT,
         amount REAL, added_by TEXT,
+        payment_method TEXT DEFAULT 'cash',
+        currency TEXT DEFAULT 'EUR',
+        amount_original REAL,
+        amount_eur REAL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+    c.execute("ALTER TABLE family_expenses ADD COLUMN IF NOT EXISTS payment_method TEXT DEFAULT 'cash'")
+    c.execute("ALTER TABLE family_expenses ADD COLUMN IF NOT EXISTS currency TEXT DEFAULT 'EUR'")
+    c.execute("ALTER TABLE family_expenses ADD COLUMN IF NOT EXISTS amount_original REAL")
+    c.execute("ALTER TABLE family_expenses ADD COLUMN IF NOT EXISTS amount_eur REAL")
+    c.execute('''CREATE TABLE IF NOT EXISTS family_balances (
+        id SERIAL PRIMARY KEY,
+        date TEXT, method TEXT, amount REAL,
+        currency TEXT DEFAULT 'EUR', amount_eur REAL,
+        added_by TEXT,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
     c.execute('''CREATE TABLE IF NOT EXISTS alerts_sent (
         id SERIAL PRIMARY KEY,
@@ -346,6 +363,48 @@ def categorize_expense(text):
 
 def is_family_group(chat_name):
     return any(kw in chat_name.lower() for kw in FAMILY_GROUP_KEYWORDS)
+
+
+def parse_currency_amount(text):
+    """Return (currency, amount_original, amount_eur) by scanning text for currency markers."""
+    t = text.strip()
+    patterns = [
+        # GEL — must check before generic number fallback
+        (r'(\d+(?:[.,]\d+)?)\s*(?:lari|gel|ლ|₾)', "GEL", GEL_TO_EUR),
+        (r'(?:lari|gel|ლ|₾)\s*(\d+(?:[.,]\d+)?)',  "GEL", GEL_TO_EUR),
+        # USD
+        (r'\$\s*(\d+(?:[.,]\d+)?)',                  "USD", USD_TO_EUR),
+        (r'(\d+(?:[.,]\d+)?)\s*(?:usd|\$|dollar)',   "USD", USD_TO_EUR),
+        # EUR explicit
+        (r'€\s*(\d+(?:[.,]\d+)?)',                   "EUR", 1.0),
+        (r'(\d+(?:[.,]\d+)?)\s*(?:eur|euro)',        "EUR", 1.0),
+        # fallback — any bare number = EUR
+        (r'(\d+(?:[.,]\d+)?)',                        "EUR", 1.0),
+    ]
+    for pattern, currency, rate in patterns:
+        m = re.search(pattern, t, re.I)
+        if m:
+            amount = float(m.group(1).replace(",", "."))
+            return currency, amount, round(amount * rate, 2)
+    return None, None, None
+
+
+def detect_payment_method(text):
+    t = text.lower()
+    if re.search(r'cash[\s_-]?home|наличные[\s_-]?дома', t):
+        return "cash_home"
+    if re.search(r'\bcart\b|\bcard\b|\bкарт', t):
+        return "card"
+    if re.search(r'\bcash\b|\bнал\b|\bналич', t):
+        return "cash"
+    return "cash"  # default
+
+
+def is_balance_message(text):
+    """True when message is ONLY a method + number, i.e. a balance report not an expense."""
+    return bool(re.match(
+        r'^\s*(?:cash[\s_-]?home|cart|card|cash)\s+\d+(?:[.,]\d+)?\s*(?:lari|gel|ლ|₾|eur|euro|usd|\$|dollar|€)?\s*$',
+        text.strip(), re.I))
 
 
 def detect_group_type(chat_name, chat_id=None):
@@ -440,40 +499,65 @@ def get_recent_group_messages(limit=10):
 # ── Family expenses ────────────────────────────────────────────────────────────
 
 def parse_expense_with_gpt(text, sender_name):
-    """GPT-4 extracts category/description/amount. Returns dict or None."""
+    """Pre-parse currency/method, then use GPT for category+description. Returns dict or None."""
+    currency, amount_original, amount_eur = parse_currency_amount(text)
+    if not amount_original:
+        return None
+    payment_method = detect_payment_method(text)
     try:
         r = openai_client.chat.completions.create(
             model="gpt-4",
             messages=[
                 {"role": "system", "content": (
-                    "Extract expense info. Reply ONLY with valid JSON: "
-                    "{\"category\": \"...\", \"description\": \"...\", \"amount\": 123.45} "
-                    "Categories: Housing, Food, Kids, Transport, Health, Entertainment, Other. "
-                    "If no amount found, return {\"amount\": null}."
+                    "Extract expense category and description. Reply ONLY with valid JSON: "
+                    "{\"category\": \"...\", \"description\": \"...\"} "
+                    "Categories: Housing, Food, Kids, Transport, Health, Entertainment, Other."
                 )},
                 {"role": "user", "content": text}
             ],
-            max_tokens=100, temperature=0,
+            max_tokens=80, temperature=0,
         )
         data = json.loads(r.choices[0].message.content.strip())
-        if not data.get("amount"):
-            return None
-        # Normalize category to our standard set
         gpt_cat = data.get("category", "Other")
         standard = categorize_expense(data.get("description", "") + " " + gpt_cat)
-        if standard != "Other":
-            data["category"] = standard
-        return data
+        return {
+            "category":       standard if standard != "Other" else gpt_cat,
+            "description":    data.get("description", text),
+            "amount":         amount_eur,          # store in EUR
+            "amount_original": amount_original,
+            "currency":       currency,
+            "payment_method": payment_method,
+        }
     except:
-        return None
+        return {
+            "category":        categorize_expense(text),
+            "description":     text,
+            "amount":          amount_eur,
+            "amount_original": amount_original,
+            "currency":        currency,
+            "payment_method":  payment_method,
+        }
 
 
-def save_family_expense(date, category, description, amount, added_by):
+def save_family_balance(date, method, amount, currency, amount_eur, added_by):
     conn = get_conn()
     c = conn.cursor()
     c.execute(
-        "INSERT INTO family_expenses (date, category, description, amount, added_by) VALUES (%s,%s,%s,%s,%s)",
-        (date, category, description, amount, added_by))
+        "INSERT INTO family_balances (date, method, amount, currency, amount_eur, added_by) VALUES (%s,%s,%s,%s,%s,%s)",
+        (date, method, amount, currency, amount_eur, added_by))
+    conn.commit()
+    conn.close()
+
+
+def save_family_expense(date, category, description, amount, added_by,
+                        payment_method="cash", currency="EUR", amount_original=None, amount_eur=None):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        "INSERT INTO family_expenses (date, category, description, amount, added_by, "
+        "payment_method, currency, amount_original, amount_eur) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+        (date, category, description, amount, added_by,
+         payment_method, currency, amount_original or amount, amount_eur or amount))
     conn.commit()
     conn.close()
 
@@ -492,12 +576,27 @@ def build_family_expenses_summary():
     rows = get_family_expenses_since(month_ago)
     if not rows:
         return "No family expenses recorded yet."
-    by_cat = {}
+    by_cat    = {}
+    by_method = {}
     for r in rows:
-        by_cat[r[2]] = by_cat.get(r[2], 0.0) + (r[4] or 0)
+        amt_eur = r[9] if len(r) > 9 and r[9] else r[4] or 0
+        by_cat[r[2]]   = by_cat.get(r[2], 0.0)   + amt_eur
+        method = r[6] if len(r) > 6 and r[6] else "cash"
+        by_method[method] = by_method.get(method, 0.0) + amt_eur
     total = sum(by_cat.values())
     lines = [f"  {cat}: €{amt:.2f}" for cat, amt in sorted(by_cat.items())]
     lines.append(f"  TOTAL: €{total:.2f}")
+    lines.append(f"  By method: " + ", ".join(f"{m} €{v:.0f}" for m, v in by_method.items()))
+    # Latest balances
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT method, amount, currency, amount_eur FROM family_balances ORDER BY created_at DESC LIMIT 6")
+    bals = c.fetchall()
+    conn.close()
+    if bals:
+        lines.append("  Current balances: " + ", ".join(
+            f"{b[0]} {b[1]}{b[2]} (€{b[3]:.0f})" if b[2] != "EUR" else f"{b[0]} €{b[1]:.0f}"
+            for b in bals))
     return "\n".join(lines)
 
 
@@ -956,16 +1055,41 @@ def webhook():
                 save_employee_expense_record(employee[0], today_str, amount, category, note)
                 send_message(chat_id, f"💰 Expense €{amount:.0f} ({category}) saved for {employee[1]}")
         elif is_family_group(chat_name):
-            expense = parse_expense_with_gpt(text, sender)
-            if expense:
-                save_family_expense(
-                    date        = datetime.now().strftime("%Y-%m-%d"),
-                    category    = expense["category"],
-                    description = expense["description"],
-                    amount      = expense["amount"],
-                    added_by    = sender,
-                )
-                send_message(chat_id, f"✅ Saved! {expense['category']} €{expense['amount']:.0f}")
+            today_str = datetime.now().strftime("%Y-%m-%d")
+            if is_balance_message(text):
+                # Balance report: "cash 2600", "card 580 gel", "cash home 1200"
+                method = detect_payment_method(text)
+                currency, orig, eur = parse_currency_amount(text)
+                if orig:
+                    save_family_balance(today_str, method, orig, currency, eur, sender)
+                    if currency != "EUR":
+                        send_message(chat_id, f"💰 Balance saved: {method} {orig:.0f} {currency} (€{eur:.0f})")
+                    else:
+                        send_message(chat_id, f"💰 Balance saved: {method} €{orig:.0f}")
+            else:
+                expense = parse_expense_with_gpt(text, sender)
+                if expense:
+                    save_family_expense(
+                        date           = today_str,
+                        category       = expense["category"],
+                        description    = expense["description"],
+                        amount         = expense["amount"],
+                        added_by       = sender,
+                        payment_method = expense["payment_method"],
+                        currency       = expense["currency"],
+                        amount_original= expense["amount_original"],
+                        amount_eur     = expense["amount"],
+                    )
+                    orig = expense["amount_original"]
+                    curr = expense["currency"]
+                    eur  = expense["amount"]
+                    method = expense["payment_method"]
+                    if curr != "EUR":
+                        send_message(chat_id,
+                            f"✅ {expense['category']} {orig:.0f} {curr} → €{eur:.0f} ({method})")
+                    else:
+                        send_message(chat_id,
+                            f"✅ {expense['category']} €{eur:.0f} ({method})")
         elif "good night" in text.lower():
             sales = get_pinned_number(chat_id)
             if sales:
